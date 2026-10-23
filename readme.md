@@ -2,7 +2,7 @@
 
 NEP (NeoRunST Executable Program) 是 NeoRunST 的用户程序格式，运行在
 ring3，**每进程独立地址空间**，任务/窗口数量无上限，抢占式调度。
-MIT 许可，见仓库根目录 LICENSE。
+开发者工具包 MIT 许可，见仓库根目录 LICENSE。
 
 ## 目录结构（开发者拿到的解压目录）
 
