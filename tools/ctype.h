@@ -38,3 +38,16 @@ static __attribute__((unused)) int tolower(int c) {
 static __attribute__((unused)) int toupper(int c) {
     return islower(c) ? c - 32 : c;
 }
+
+static __attribute__((unused)) int isblank(int c) {
+    return c == ' ' || c == '\t';
+}
+static __attribute__((unused)) int isprint(int c) {
+    return c >= 32 && c < 127;
+}
+static __attribute__((unused)) int isascii(int c) {
+    return c >= 0 && c <= 127;
+}
+static __attribute__((unused)) int toascii(int c) {
+    return c & 0x7f;
+}
