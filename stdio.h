@@ -1,14 +1,11 @@
-﻿#pragma once
+#pragma once
 // ── NEP 类标准库: stdio ──
 // 控制台 printf / scanf / sprintf, 建立在 nep.h 的 syscall 之上。
 // 控制台程序不需要 nep_win_create — 第一次 printf 时内核自动开一个
 // "<程序名> - 控制台" 窗口 (纯 print 的程序就是控制台程序)。
 //
 // 已支持的格式 (先慢慢来, 够用就好):
-//   printf/	sprintf: %c %s %d %i %u %x %X %p %% 以及 l 前缀 (ld/lu/lx);
-//                     浮点 %f %e %g (%F/%E/%G 同义), 支持精度/宽度/标志
-//                     (- 0 + 空格, 如 %.14g %8.3f %-10.2e) — bigint 精确
-//                     十进制转换, 末位舍入正确
+//   printf/	sprintf: %c %s %d %i %u %x %X %p %%  以及 l 前缀 (ld/lu/lx)
 //   scanf:           %d %i %u %x %s %c      支持宽度 (如 %63s)
 //
 // 用法:
@@ -46,336 +43,33 @@ static unsigned int nr_strlen(const char* s) {
 }
 
 // ── 格式化核心: 输出写入 out (容量 cap, 恒 NUL 结尾), 返回写入长度 ──
-
-// ── 浮点格式化支撑 (%f/%e/%g): bigint 精确十进制转换 ──
-// double = m53 × 2^e2 (m53 ≤ 2^53)。e2≥0: 左移; e2<0: 乘 5^|e2| 再除 10^|e2|
-// —— 全程整数运算, 数字串精确, 末位舍入可靠 (反复除 10 会积累误差)。
-// 基数 1e9 的 limb 数组; 上限 150 limb = 1350 位 (5^1074 ≈ 10^751 够用)
-typedef struct { unsigned int l[150]; int n; } nr_big_t;
-
-__attribute__((unused))
-static void nr_big_set(nr_big_t* b, unsigned long long v) {
-    b->n = 0;
-    while (v) { b->l[b->n++] = (unsigned int)(v % 1000000000u); v /= 1000000000u; }
-    if (!b->n) { b->l[0] = 0; b->n = 1; }
-}
-
-__attribute__((unused))
-static void nr_big_shl1(nr_big_t* b) {           // ×2
-    unsigned long long carry = 0;
-    for (int i = 0; i < b->n; i++) {
-        unsigned long long cur = ((unsigned long long)b->l[i] << 1) + carry;
-        b->l[i] = (unsigned int)(cur % 1000000000u);
-        carry = cur / 1000000000u;
-    }
-    if (carry) b->l[b->n++] = (unsigned int)carry;
-}
-
-__attribute__((unused))
-static void nr_big_mul5(nr_big_t* b) {           // ×5
-    unsigned long long carry = 0;
-    for (int i = 0; i < b->n; i++) {
-        unsigned long long cur = (unsigned long long)b->l[i] * 5u + carry;
-        b->l[i] = (unsigned int)(cur % 1000000000u);
-        carry = cur / 1000000000u;
-    }
-    while (carry) { b->l[b->n++] = (unsigned int)(carry % 1000000000u); carry /= 1000000000u; }
-}
-
-// bigint → 十进制数字串 (无前导零), 返回位数
-__attribute__((unused))
-static int nr_big_str(const nr_big_t* b, char* out) {
-    char tmp[1400];
-    int m = 0;
-    for (int i = b->n - 1; i >= 0; i--) {
-        unsigned int v = b->l[i];
-        if (i == b->n - 1) {                     // 最高 limb 不补零
-            char t[10]; int k = 0;
-            if (!v) t[k++] = '0';
-            while (v) { t[k++] = (char)('0' + v % 10u); v /= 10u; }
-            while (k) tmp[m++] = t[--k];
-        } else {
-            tmp[m++] = (char)('0' + (v / 100000000u) % 10);
-            tmp[m++] = (char)('0' + (v / 10000000u) % 10);
-            tmp[m++] = (char)('0' + (v / 1000000u) % 10);
-            tmp[m++] = (char)('0' + (v / 100000u) % 10);
-            tmp[m++] = (char)('0' + (v / 10000u) % 10);
-            tmp[m++] = (char)('0' + (v / 1000u) % 10);
-            tmp[m++] = (char)('0' + (v / 100u) % 10);
-            tmp[m++] = (char)('0' + (v / 10u) % 10);
-            tmp[m++] = (char)('0' + v % 10u);
-        }
-    }
-    for (int i = 0; i < m; i++) out[i] = tmp[i];
-    out[m] = 0;
-    return m;
-}
-
-// x 的精确十进制数字串 (有效数字, 无前导零) + E10: x = d1.d2d3... × 10^E10
-// s 容量 ≥ 1100。subnormal/超大都覆盖 (e2 ∈ [-1074, 971])
-__attribute__((unused))
-static void nr_dec(double x, char* s, int* D_out, int* E_out) {
-    unsigned long long u;
-    { union { double d; unsigned long long u; } cvt; cvt.d = x; u = cvt.u; }
-    int neg = (int)(u >> 63);
-    int be = (int)((u >> 52) & 0x7FF);
-    unsigned long long frac = u & ((1ULL << 52) - 1);
-    unsigned long long m; int e2;
-    if (be == 0) { m = frac; e2 = -1074; }                    // 零/次正规
-    else         { m = frac | (1ULL << 52); e2 = be - 1075; }
-    (void)neg;
-    nr_big_t b; nr_big_set(&b, m);
-    if (e2 >= 0) {
-        for (int i = 0; i < e2; i++) nr_big_shl1(&b);
-        *D_out = nr_big_str(&b, s);
-        *E_out = *D_out - 1;
-    } else {
-        int k = -e2;
-        for (int i = 0; i < k; i++) nr_big_mul5(&b);
-        *D_out = nr_big_str(&b, s);
-        *E_out = *D_out - 1 - k;
-    }
-}
-
-// 保留 P 位有效数字 (就地舍入, 半进位)。返回舍入后的位数
-__attribute__((unused))
-static int nr_round_sig(char* s, int D, int P, int* E10) {
-    if (P < 1) P = 1;
-    char c = (P < D) ? s[P] : '0';
-    if (c < '5') return (P < D) ? P : D;
-    int i = P - 1;
-    while (i >= 0) {
-        if (s[i] == '9') s[i] = '0';
-        else { s[i]++; break; }
-        i--;
-    }
-    if (i < 0) {                                  // 全 9 进位 → d1=1, E10++
-        for (int j = P - 1; j > 0; j--) s[j] = s[j - 1];
-        s[0] = '1';
-        (*E10)++;
-    }
-    return P;
-}
-
-// 写 'e±XX' 指数 (至少 2 位)
-__attribute__((unused))
-static int nr_put_exp(char* out, int o, int E10) {
-    out[o++] = (E10 < 0) ? '-' : '+';
-    unsigned a = (unsigned)((E10 < 0) ? -E10 : E10);
-    char t[4]; int m = 0;
-    while (a) { t[m++] = (char)('0' + a % 10u); a /= 10u; }
-    if (m < 2) { out[o++] = '0'; if (m == 0) out[o++] = '0'; }
-    while (m) out[o++] = t[--m];
-    return o;
-}
-
-// 浮点核心: 生成带符号的串 (不含宽度填充)。返回长度
-__attribute__((unused))
-static int nr_fmt_float(char* out, int cap, double x, char conv, int prec,
-                        int plus, int space) {
-    unsigned long long u;
-    { union { double d; unsigned long long u; } cvt; cvt.d = x; u = cvt.u; }
-    int neg = (int)(u >> 63);
-    int be = (int)((u >> 52) & 0x7FF);
-
-    char sig = 0;
-    if (neg) sig = '-';
-    else if (plus) sig = '+';
-    else if (space) sig = ' ';
-
-    int o = 0;
-    #define NR_PUT(c) do { if (o < cap - 1) out[o] = (c); o++; } while (0)
-
-    // 特殊值 (符号只在这里定一次; nan 按无符号打印 — Windows/MSVC 约定,
-    // x86 默认 QNaN 符号位为 1, 不能按位直接打)
-    if (be == 0x7FF) {
-        unsigned long long fr = u & ((1ULL << 52) - 1);
-        const char* w = fr ? "nan" : ((neg && !sig) ? "-inf" : "inf");
-        if (sig && !fr) NR_PUT(sig);
-        while (*w) NR_PUT(*w++);
-        out[(o < cap - 1) ? o : cap - 1] = 0;
-        return o;
-    }
-
-    int is_zero = (be == 0 && (u & ((1ULL << 52) - 1)) == 0);
-    char s[1100]; int D = 0, E10 = 0;
-    if (is_zero) {                                // ±0
-        s[0] = '0'; D = 1; E10 = 0;
-    } else {
-        nr_dec(x, s, &D, &E10);
-    }
-
-    if (conv == 'g' || conv == 'G') {
-        int P = (prec < 0) ? 6 : (prec == 0 ? 1 : prec);
-        if (P > 760) P = 760;
-        if (is_zero) {                            // 0 → "0"
-            if (sig) NR_PUT(sig);
-            NR_PUT('0');
-        } else {
-            D = nr_round_sig(s, D, P, &E10);
-            int X = E10;
-            if (X >= -4 && X < P) {               // f 风格
-                int pf = P - 1 - X;
-                int last = -1;                    // 最后一个非零 frac 位
-                for (int i = 0; i < pf; i++) {
-                    int idx = X + 1 + i;
-                    if (idx >= 0 && idx < D && s[idx] != '0') last = i;
-                }
-                int ip = X + 1;                   // 整数位数
-                if (sig) NR_PUT(sig);
-                if (ip <= 0) NR_PUT('0');
-                for (int i = 0; i < ip; i++) NR_PUT((i < D) ? s[i] : '0');
-                if (last >= 0) {
-                    NR_PUT('.');
-                    for (int i = 0; i <= last; i++) {
-                        int idx = X + 1 + i;
-                        NR_PUT((idx >= 0 && idx < D) ? s[idx] : '0');
-                    }
-                }
-            } else {                              // e 风格
-                if (sig) NR_PUT(sig);
-                NR_PUT(s[0]);
-                int last = -1;
-                for (int i = 0; i < P - 1; i++) if (s[1 + i] != '0') last = i;
-                if (last >= 0) {
-                    NR_PUT('.');
-                    for (int i = 0; i <= last; i++) NR_PUT(s[1 + i]);
-                }
-                NR_PUT((conv == 'G') ? 'E' : 'e');
-                o = nr_put_exp(out, o, X);
-            }
-        }
-    }
-    else if (conv == 'e' || conv == 'E') {
-        int P = (prec < 0) ? 6 : prec;
-        if (P > 760) P = 760;
-        if (sig) NR_PUT(sig);
-        if (is_zero) {
-            NR_PUT('0');
-            if (P > 0) { NR_PUT('.'); for (int i = 0; i < P; i++) NR_PUT('0'); }
-            NR_PUT((conv == 'E') ? 'E' : 'e');
-            o = nr_put_exp(out, o, 0);
-        } else {
-            D = nr_round_sig(s, D, P + 1, &E10);  // P 位小数 → P+1 位有效
-            NR_PUT(s[0]);
-            if (P > 0) {
-                NR_PUT('.');
-                for (int i = 0; i < P; i++) NR_PUT((1 + i < D) ? s[1 + i] : '0');
-            }
-            NR_PUT((conv == 'E') ? 'E' : 'e');
-            o = nr_put_exp(out, o, E10);
-        }
-    }
-    else {                                        // f
-        int pf = (prec < 0) ? 6 : prec;
-        if (pf > 500) pf = 500;
-        if (is_zero) {
-            if (sig) NR_PUT(sig);
-            NR_PUT('0');
-            if (pf > 0) { NR_PUT('.'); for (int i = 0; i < pf; i++) NR_PUT('0'); }
-        } else {
-            // 在小数点后 pf 位处舍入 (pos = 绝对数字位)
-            int pos = E10 + 1 + pf;
-            int Deff;
-            if (pos <= 0) {
-                if (pos == 0 && D > 0 && s[0] >= '5') { E10++; s[0] = '1'; Deff = 1; }
-                else Deff = 0;                    // 舍入后为 0
-            } else {
-                char c = (pos < D) ? s[pos] : '0';
-                if (c >= '5') {
-                    int i = pos - 1;
-                    while (i >= 0) {
-                        if (s[i] == '9') s[i] = '0';
-                        else { s[i]++; break; }
-                        i--;
-                    }
-                    if (i < 0) {                  // 全 9 → 进位新位
-                        int top = (pos < D) ? pos : D;
-                        for (int j = top - 1; j > 0; j--) s[j] = s[j - 1];
-                        s[0] = '1';
-                        E10++;
-                    }
-                }
-                Deff = pos;
-            }
-            if (sig) NR_PUT(sig);
-            if (E10 < 0) NR_PUT('0');             // 整数部分
-            else for (int i = 0; i <= E10; i++) NR_PUT((i < Deff && i < D) ? s[i] : '0');
-            if (pf > 0) {
-                NR_PUT('.');
-                for (int i = 0; i < pf; i++) {
-                    int idx = E10 + 1 + i;
-                    NR_PUT((idx >= 0 && idx < Deff && idx < D) ? s[idx] : '0');
-                }
-            }
-        }
-    }
-    #undef NR_PUT
-    out[(o < cap - 1) ? o : cap - 1] = 0;
-    return o;
-}
-
-// ── 格式化核心 ──
 __attribute__((unused))
 static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
-    int n = 0;
-    #define NR_PUT(c) do { if (n < cap - 1) out[n] = (c); n++; } while (0)
+    if (cap < 1) cap = 1;
+    long n = 0;
+    long room = (long)cap - 1;
+    #define NR_PUT(c) do { if (n < room) out[n] = (c); n++; } while (0)
     for (; *fmt; fmt++) {
         if (*fmt != '%') { NR_PUT(*fmt); continue; }
         fmt++;
-        if (!*fmt) break;
-        // 标志
-        int f_minus = 0, f_zero = 0, f_plus = 0, f_space = 0;
-        for (;; fmt++) {
-            if (*fmt == '-') f_minus = 1;
-            else if (*fmt == '0') f_zero = 1;
-            else if (*fmt == '+') f_plus = 1;
-            else if (*fmt == ' ') f_space = 1;
-            else break;
-        }
-        // 宽度
-        int width = 0;
-        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
-        // 精度
-        int prec = -1;
-        if (*fmt == '.') {
-            fmt++; prec = 0;
-            while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
-        }
         // 长度前缀
         int lng = 0;
         while (*fmt == 'l') { lng++; fmt++; }
+        int prec = -1;
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
+        }
         char c = *fmt;
         if (!c) break;
         if (c == '%') { NR_PUT('%'); continue; }
         if (c == 'c') { NR_PUT((char)va_arg(ap, int)); continue; }
-        if (c == 'f' || c == 'e' || c == 'g' || c == 'F' || c == 'E' || c == 'G') {
-            double v = va_arg(ap, double);
-            char core[1300];
-            int cl = nr_fmt_float(core, (int)sizeof(core), v, c, prec, f_plus, f_space);
-            if (width > cl) {                     // 宽度填充
-                int pad = width - cl;
-                if (f_minus) {
-                    for (int i = 0; i < cl; i++) NR_PUT(core[i]);
-                    while (pad--) NR_PUT(' ');
-                } else if (f_zero) {
-                    int p = (core[0] == '-' || core[0] == '+' || core[0] == ' ') ? 1 : 0;
-                    for (int i = 0; i < p; i++) NR_PUT(core[i]);
-                    while (pad--) NR_PUT('0');
-                    for (int i = p; i < cl; i++) NR_PUT(core[i]);
-                } else {
-                    while (pad--) NR_PUT(' ');
-                    for (int i = 0; i < cl; i++) NR_PUT(core[i]);
-                }
-            } else {
-                for (int i = 0; i < cl; i++) NR_PUT(core[i]);
-            }
-            continue;
-        }
         if (c == 's') {
             const char* s = va_arg(ap, const char*);
             if (!s) s = "(null)";
-            while (*s) NR_PUT(*s++);
+            int lim = 0;
+            while (*s && (prec < 0 || lim < prec)) { NR_PUT(*s++); lim++; }
             continue;
         }
         if (c == 'p') {
@@ -394,7 +88,7 @@ static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
             int neg = 0;
             if (c == 'd' || c == 'i') {
                 long long sv = lng ? va_arg(ap, long long) : va_arg(ap, int);
-                if (sv < 0) { neg = 1; v = (unsigned long long)(-sv); }
+                if (sv < 0) { neg = 1; v = (unsigned long long)(-(sv + 1)) + 1ULL; }
                 else v = (unsigned long long)sv;
             } else {
                 v = lng ? va_arg(ap, unsigned long long) : va_arg(ap, unsigned int);
@@ -412,8 +106,9 @@ static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
         // 未知转换符: 原样输出
         NR_PUT('%'); NR_PUT(c);
     }
-    if (n < cap) out[(n < cap - 1) ? n : cap - 1] = '\0';
-    return (n < cap) ? n : cap - 1;
+    if (n < (long)cap) out[(n < room) ? n : room] = '\0';
+    if (n > 2147483647L) return 2147483647;
+    return (int)n;
     #undef NR_PUT
 }
 
@@ -431,9 +126,11 @@ static int sprintf(char* buf, const char* fmt, ...) {
 // 被截断时大于实际写入 — 同 C 标准, 可用于先探长度)
 __attribute__((unused))
 static int vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap) {
-    if (!buf || cap < 1) { buf = 0; }
-    int n = nr_vfmt(buf ? buf : (char*)"", buf && cap > 0 ? (int)cap : 1, fmt, ap);
-    return n;
+    if (!buf || cap < 1) {
+        char __nr_scratch[1];
+        return nr_vfmt(__nr_scratch, 1, fmt, ap);
+    }
+    return nr_vfmt(buf, (int)cap, fmt, ap);
 }
 
 __attribute__((unused))
@@ -475,7 +172,6 @@ static int printf(const char* fmt, ...) {
         if (saved == '\0') break;
         total++;                       // 计入换行本身
         p = nl + 1;
-        if (!saved) break;
     }
     return total;
 }
@@ -541,7 +237,7 @@ static int scanf(const char* fmt, ...) {
             if (*p == '-') { neg = 1; p++; }
             else if (*p == '+') p++;
             unsigned long long v = 0;
-            int any = 0;
+            int any = 0, over = 0;
             if (c == 'x') {
                 while (*p) {
                     int d;
@@ -549,14 +245,19 @@ static int scanf(const char* fmt, ...) {
                     else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
                     else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
                     else break;
-                    v = v * 16 + (unsigned)d; any = 1; p++;
+                    if (v > (0xFFFFFFFFFFFFFFFFULL - (unsigned)d) / 16) over = 1;
+                    else v = v * 16 + (unsigned)d;
+                    any = 1; p++;
                 }
             } else {
                 while (*p >= '0' && *p <= '9') {
-                    v = v * 10 + (unsigned)(*p - '0'); any = 1; p++;
+                    unsigned d = (unsigned)(*p - '0');
+                    if (v > (0xFFFFFFFFFFFFFFFFULL - d) / 10) over = 1;
+                    else v = v * 10 + d;
+                    any = 1; p++;
                 }
             }
-            if (!any) break;
+            if (!any || over) break;
             if (c == 'u') {
                 if (lng) { unsigned long* dst = va_arg(ap, unsigned long*); *dst = (unsigned long)v; }
                 else { unsigned int* dst = va_arg(ap, unsigned int*); *dst = (unsigned int)v; }
@@ -579,21 +280,29 @@ static int scanf(const char* fmt, ...) {
 // ── 数值 / 随机数工具 (系统可直接支持的部分) ──
 
 static int atoi(const char* s) {
-    int r = 0, neg = 0;
+    long long r = 0; int neg = 0;
     while (*s == ' ' || *s == '\t') s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
-    while (*s >= '0' && *s <= '9') { r = r * 10 + (*s - '0'); s++; }
-    return neg ? -r : r;
+    while (*s >= '0' && *s <= '9') {
+        if (r < 2147483648LL) r = r * 10 + (*s - '0');
+        s++;
+    }
+    if (neg) return r >= 2147483648LL ? (-2147483647 - 1) : (int)-r;
+    return r > 2147483647LL ? 2147483647 : (int)r;
 }
 
 static long atol(const char* s) {
-    long r = 0; int neg = 0;
+    long long r = 0; int neg = 0;
     while (*s == ' ' || *s == '\t') s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
-    while (*s >= '0' && *s <= '9') { r = r * 10 + (*s - '0'); s++; }
-    return neg ? -r : r;
+    while (*s >= '0' && *s <= '9') {
+        if (r < 922337203685477580LL) r = r * 10 + (*s - '0');
+        s++;
+    }
+    if (neg) return r >= 9223372036854775807LL ? (long)(-9223372036854775807LL - 1) : (long)-r;
+    return r > 9223372036854775807LL ? (long)9223372036854775807LL : (long)r;
 }
 
 static int abs(int v) { return v < 0 ? -v : v; }
@@ -621,17 +330,11 @@ static int rand(void) {
 #define SEEK_SET  0
 #define SEEK_CUR  1
 #define SEEK_END  2
-#define BUFSIZ    1024
-#define L_tmpnam  260
-#define _IONBF    0
-#define _IOLBF    1
-#define _IOFBF    2
 
 typedef struct {
     int fd;    // 内核 fd (>=1); 0 = 空槽
     int eof;
     int err;
-    int ungot; // ungetc 预读字符 (-1 = 无)
 } FILE;
 
 // 本编译单元的 FILE 池 (fopen 分配, fclose 归还; 上限 8 个同开)
@@ -650,7 +353,6 @@ static FILE* fopen(const char* path, const char* mode) {
         __nr_file_pool[i].fd = (int)fd;
         __nr_file_pool[i].eof = 0;
         __nr_file_pool[i].err = 0;
-        __nr_file_pool[i].ungot = -1;
         return &__nr_file_pool[i];
     }
     return NULL;
@@ -669,6 +371,7 @@ __attribute__((unused))
 static size_t fread(void* ptr, size_t sz, size_t n, FILE* f) {
     if (!f || f->fd <= 0 || !ptr || sz == 0 || n == 0) return 0;
     unsigned long long total = (unsigned long long)sz * n;
+    if (total > (sizeof(long) == 4 ? 0x7FFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL)) { f->err = 1; return 0; }
     long r = nep_file_read(f->fd, ptr, (long)total);
     if (r < 0) { f->err = 1; return 0; }
     if ((unsigned long long)r < total) f->eof = 1;
@@ -680,6 +383,7 @@ __attribute__((unused))
 static size_t fwrite(const void* ptr, size_t sz, size_t n, FILE* f) {
     if (!f || f->fd <= 0 || !ptr || sz == 0 || n == 0) return 0;
     unsigned long long total = (unsigned long long)sz * n;
+    if (total > (sizeof(long) == 4 ? 0x7FFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL)) { f->err = 1; return 0; }
     long r = nep_file_write(f->fd, ptr, (long)total);
     if (r < 0) { f->err = 1; return 0; }
     if ((unsigned long long)r < total) f->err = 1;
@@ -701,6 +405,8 @@ __attribute__((unused))
 static long ftell(FILE* f) {
     if (!f || f->fd <= 0) return -1L;
     long long r = nep_file_seek(f->fd, 0, SEEK_CUR);
+    if (r < 0) return -1L;
+    if (r > (long long)((unsigned long)~0UL >> 1)) { f->err = 1; return -1L; }
     return (long)r;
 }
 
@@ -708,20 +414,18 @@ __attribute__((unused))
 static void rewind(FILE* f) { fseek(f, 0L, SEEK_SET); }
 
 __attribute__((unused))
-static int feof(FILE* f)  { return (f && f->fd > 0) ? f->eof : 0; }
+static int feof(FILE* f)  { return (f && f->fd != 0) ? f->eof : 0; }
 __attribute__((unused))
-static int ferror(FILE* f) { return (f && f->fd > 0) ? f->err : 0; }
+static int ferror(FILE* f) { return (f && f->fd != 0) ? f->err : 0; }
 
 // 读一个字符 (返回 0..255), EOF = 结束/错误
 __attribute__((unused))
 static int fgetc(FILE* f) {
     unsigned char c;
     if (!f || f->fd <= 0) return EOF;
-    if (f->ungot >= 0) { int r = f->ungot; f->ungot = -1; return r; }
     if (nep_file_read(f->fd, &c, 1) != 1) { f->eof = 1; return EOF; }
     return (int)c;
 }
-#define getc(f) fgetc(f)
 
 // 写一个字符; EOF = 失败
 __attribute__((unused))
@@ -764,68 +468,14 @@ static int fputs(const char* s, FILE* f) {
 // 删除文件。0 = 成功, EOF = 失败
 __attribute__((unused))
 static int remove(const char* path) {
+    if (!path) return EOF;
     return nep_file_delete(path) == 0 ? 0 : EOF;
-}
-
-// 重命名: 内核无 rename syscall — 失败 (os.rename 会报错)
-__attribute__((unused))
-static int rename(const char* from, const char* to) {
-    (void)from; (void)to;
-    return EOF;
-}
-
-// 字符推回 (一次一个; 推 EOF 为 no-op)。0 = 成功, EOF = 失败
-__attribute__((unused))
-static int ungetc(int ch, FILE* f) {
-    if (!f || f->fd <= 0 || ch == EOF || f->ungot >= 0) return EOF;
-    f->ungot = (unsigned char)ch;
-    f->eof = 0;
-    return ch;
-}
-
-// 无缓冲模型: fflush 恒成功 (数据已直接写内核)
-__attribute__((unused))
-static int fflush(FILE* f) {
-    (void)f;
-    return 0;
-}
-
-// setvbuf: 恒成功 (无用户可调缓冲)
-__attribute__((unused))
-static int setvbuf(FILE* f, char* buf, int mode, size_t size) {
-    (void)f; (void)buf; (void)mode; (void)size;
-    return 0;
-}
-
-// clearerr: 清除 eof/err 标志
-__attribute__((unused))
-static void clearerr(FILE* f) {
-    if (f) { f->eof = 0; f->err = 0; }
-}
-
-// 关闭旧流并重新打开。失败返回 NULL (原流状态不定, 调用方不应再用)
-__attribute__((unused))
-static FILE* freopen(const char* path, const char* mode, FILE* f) {
-    if (!f) return NULL;
-    fclose(f);
-    long fd = nep_file_open(path, mode);
-    if (fd < 0) { f->fd = 0; return NULL; }
-    f->fd = (int)fd;
-    f->eof = 0;
-    f->err = 0;
-    f->ungot = -1;
-    return f;
-}
-
-// 临时文件: 不支持 (内核无临时目录概念)
-__attribute__((unused))
-static FILE* tmpfile(void) {
-    return NULL;
 }
 
 // 创建目录 (仅末级, 父目录须存在)。0 = 成功, EOF = 失败
 __attribute__((unused))
 static int mkdir(const char* path) {
+    if (!path) return EOF;
     return nep_file_mkdir(path) == 0 ? 0 : EOF;
 }
 
@@ -841,6 +491,7 @@ static int mkdir(const char* path) {
 // 彩色输出一行 (自动加换行; win_id<0 = 控制台)。返回 0 = 成功
 __attribute__((unused))
 static int cputs(int win_id, const char* s, unsigned color) {
+    if (!s) return EOF;
     return nep_win_print_color(win_id, s, color);
 }
 
@@ -853,24 +504,18 @@ static int puts(const char* s) {
 
 // putchar: 输出一个字符。为避免逐字符 syscall 各自成行, 内部做行缓冲:
 // 凑满一行或遇到 '\n' 才真正输出。返回写入的字符
-static __attribute__((section(".data"))) char __pb[118];   // 内核单行缓冲 120 字节, 留 2 字节余量 (须落 .data, 见 FILE 池注释)
-static __attribute__((section(".data"))) int  __pl = 0;
-
-// 立即输出行缓冲中的残行 (不补换行) — 提示符/交互输出用它保证顺序
 __attribute__((unused))
-static void console_flush(void) {
-    if (__pl > 0) {
-        __pb[__pl] = '\0';
+static int putchar(int ch) {
+    static __attribute__((section(".data"))) char __pb[118];   // 内核单行缓冲 120 字节, 留 2 字节余量 (须落 .data, 见 FILE 池注释)
+    static __attribute__((section(".data"))) int  __pl = 0;
+    char c = (char)ch;
+    if (__pl >= (int)sizeof(__pb) - 1) {
+        __pb[(int)sizeof(__pb) - 1] = '\0';
         nep_win_print(-1, __pb);
         __pl = 0;
     }
-}
-
-__attribute__((unused))
-static int putchar(int ch) {
-    char c = (char)ch;
     __pb[__pl++] = c;
-    if (c == '\n' || __pl >= (int)sizeof(__pb) - 1) {
+    if (c == '\n') {
         __pb[__pl] = '\0';
         nep_win_print(-1, __pb);
         __pl = 0;
