@@ -191,6 +191,7 @@ static inline long reg_set(const char* path, const char* name,
 // 写便捷封装: 文本值 (REG_SZ_UTF8, size 自动 +NUL)
 static inline long reg_set_str(const char* path, const char* name,
                                const char* text) {
+    if (!text) return nep_reg_set(path, name, REG_SZ_UTF8, "", 1);
     return nep_reg_set(path, name, REG_SZ_UTF8, text, (long)strlen(text) + 1);
 }
 
@@ -254,6 +255,7 @@ static inline int net_parse_ip(const char* s, unsigned char out[4]) {
         unsigned v = 0; int n = 0;
         while (*s >= '0' && *s <= '9' && n < 3) { v = v * 10 + (*s - '0'); s++; n++; }
         if (n == 0 || v > 255) return -1;
+        if (n > 1 && *(s - n) == '0') return -1;
         out[i] = (unsigned char)v;
         if (i < 3) { if (*s != '.') return -1; s++; }
     }
