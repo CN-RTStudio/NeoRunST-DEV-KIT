@@ -12,12 +12,18 @@ dev/
 ├── stdio.h        类标准库: printf / sprintf / snprintf / scanf / atoi / abs / rand
 │                  perror(红字报错) / puts / putchar / cputs(彩色输出)
 │                  以及 fopen 系列文件操作 (FILE / fread / fwrite / remove / mkdir)
-├── string.h       字符串/内存: strcpy / strcmp / memset / memcpy 等 (标准语义)
+├── string.h       字符串/内存: strcpy / strcmp / memset / memcpy / strpbrk 等 (标准语义)
 ├── runst.h        应用主 API (类似 windows.h): 窗口、控件、消息框、控制台、
 │                  system(执行终端命令)、网络 (TCP/ping)、程序退出
 ├── buildnep.exe   构建工具 — 直接双击/命令行用, 不需要 make 或其他脚本
-└── tools/         (隐藏, 开发者不动 — 内含 nep.h、crt0.c 等所有依赖)
+└── tools/         (隐藏, 开发者不动 — 内含 nep.h、crt0.c、heap.h、
+                   兼容 shim 头 (stdlib/time/ctype/errno/locale/signal/assert))
 ```
+
+**附加组件 — 数学库 (不在本包内):** [NeoRunST-Math](https://github.com/NeoRunST/NeoRunST-Math)
+(musl 移植, ~1ulp)。需要 sin/cos/pow 等数学函数的项目单独下载, 把 `math.h`
+放到包根目录 (与 stdio.h 并列)、`src\*.c` 放到 `tools\math\` 即可被
+buildnep 自动找到; 用到哪个 .c 编译时加哪个。
 
 ## 重要：必须用 dev 工具包的标准库
 
@@ -174,7 +180,38 @@ int ok = ping(ip, 3);                         // ping 3 次, 返回成功次数
 ### string.h (字符串/内存)
 
 标准语义, freestanding 自实现: `strlen strcpy strncpy strcat strcmp strncmp
-strchr strrchr strstr memset memcpy memmove memcmp`
+strchr strrchr strstr memset memcpy memmove memcmp strspn strcspn strpbrk
+strcoll memchr`
+
+### math.h (附加组件, 见 [NeoRunST-Math](https://github.com/NeoRunST/NeoRunST-Math))
+
+`fabs ceil floor trunc round fmod modf copysign sqrt scalbn frexp ldexp
+exp expm1 log log1p log10 log2 pow sin cos tan asin acos atan atan2 sinh
+cosh tanh`, 常量 `M_PI` 等 + `INFINITY / NAN / isnan / isinf / isfinite /
+signbit`。精度约 1ulp (sqrt 为 SSE2 精确)。
+
+下载后 `math.h` 放包根目录, `src\*.c` 放 `tools\math\`, **用到哪个 .c
+编译时加哪个** (懒人全加也行, ~30KB):
+
+```
+buildnep.exe main.c tools\math\pow.c tools\math\log.c ... -o app.nep
+```
+
+### 兼容 shim 头 (tools\, 移植第三方 C 代码用)
+
+| 头 | 内容 |
+|------|------|
+| `stdlib.h` | `malloc/free/calloc/realloc` (来自 heap.h) / `exit/abort` / `getenv`(恒NULL) / `system`(恒失败) / `strtod` 需自实现 |
+| `heap.h` | 用户态堆: 每任务 1MB, `malloc` 家族, 状态落 .data |
+| `time.h` | `time_t / struct tm / time / clock / mktime / gmtime / localtime / difftime / strftime` (uptime 纪元, UTC) |
+| `ctype.h` | `isspace/isalpha/.../tolower/toupper` (纯 ASCII) |
+| `errno.h` | `errno` + 常用错误码 + `strerror` (通用 "error") |
+| `locale.h` | `"C"` locale, `localeconv` / `setlocale` |
+| `signal.h` | 仅占位 (无信号机制) |
+| `assert.h` | `assert` 为空操作 (freestanding 无 `__assert_fail`) |
+
+典型移植案例: **Lua 5.5.1 解释器** (见 neorunst-lua 仓库) 就建立在这套
+shim + math 之上。
 
 ### stdio.h 其他工具
 
@@ -215,8 +252,10 @@ strchr strrchr strstr memset memcpy memmove memcmp`
 | `CONSOLE_RED / GREEN / BLUE / YELLOW / GRAY` | cputs 用的颜色常量 (0x00RRGGBB) |
 | `scanf(fmt, ...)` | 从控制台读一行并解析; `%d %i %u %x %s %c`, 支持宽度如 `%63s` |
 | `fopen / fclose / fread / fwrite / fseek / ftell / rewind / feof / ferror` | 文件读写 (见下) |
-| `fgetc / fputc / fgets / fputs` | 按字符/行读写文件 |
+| `fgetc / fputc / fgets / fputs / ungetc / getc` | 按字符/行读写文件 |
 | `remove / mkdir` | 删除文件 / 创建目录 |
+| `fflush / setvbuf / clearerr / freopen / rename / tmpfile` | 兼容接口: fflush/setvbuf/clearerr 空操作恒成功, rename/tmpfile 恒失败 (内核无对应 syscall) |
+| `console_flush()` | 立即输出 putchar 行缓冲中的残行 (不补换行), 交互提示符用 |
 
 ### 文件操作 (stdio.h 的 fopen 系列)
 
@@ -308,6 +347,7 @@ int nep_main(void) {
 | `nep_win_draw_blit(win, x, y, w, h, pixels32)` | 把 32bpp (0xAARRGGBB) 像素块灌入窗口位图层, 内核每帧重绘时合成, 越界自动裁剪 |
 | `nep_win_get_size(win, &w, &h)` | 读窗口客户区尺寸 |
 | `nep_on_shutdown(cb)` | 注册关机回调 `int cb(void)`: 返回 0 = 阻止关机, 非 0 = 同意退出; 关机流程会轮询等待 |
+| `nep_ticks()` | 开机毫秒数 (syscall 44), 计时/os.clock 类用途 |
 
 ### 执行环境特性
 

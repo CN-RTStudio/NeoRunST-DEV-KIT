@@ -37,6 +37,13 @@ static inline void __attribute__((noreturn)) nep_exit(void) {
     for (;;) __asm__ volatile("hlt");
 }
 
+// 开机以来的毫秒数 (syscall 44; os.clock / 计时用)
+static inline long nep_ticks(void) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(44L) : "memory");
+    return r;
+}
+
 // 创建窗口, 返回窗口 id (<0 失败)。宽高会被内核夹取到合理范围
 static inline int nep_win_create(const char* title, int w, int h) {
     long r;
@@ -534,5 +541,14 @@ static inline int nep_ping(const unsigned char ip[4], int count) {
     long r;
     __asm__ volatile("int $0x80" : "=a"(r)
                      : "a"(42L), "D"(ip), "S"((long)count) : "memory");
+    return (int)r;
+}
+
+// 用户堆扩容: 保证堆区前 total_bytes 字节已映射 (heap.h 内部用,
+// 程序一般不直接调)。0 = 成功, -1 = 超过上限 (1MB) / 物理页耗尽
+static inline int nep_heap_grow(long total_bytes) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(43L), "D"((long)total_bytes) : "memory");
     return (int)r;
 }

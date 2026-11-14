@@ -98,3 +98,38 @@ static int memcmp(const void* a, const void* b, unsigned int n) {
     }
     return 0;
 }
+
+// ── 字符集扫描 (Lua lstrlib / lobject 用) ──
+static unsigned int strspn(const char* s, const char* set) {
+    unsigned int n = 0;
+    for (; s[n]; n++) {
+        if (!strchr(set, s[n])) return n;
+    }
+    return n;
+}
+
+static unsigned int strcspn(const char* s, const char* set) {
+    unsigned int n = 0;
+    for (; s[n]; n++) {
+        if (strchr(set, s[n])) return n;
+    }
+    return n;
+}
+
+static char* strpbrk(const char* s, const char* set) {
+    for (; *s; s++)
+        if (strchr(set, *s)) return (char*)s;
+    return 0;
+}
+
+// 无 locale: strcoll 即 strcmp
+static int strcoll(const char* a, const char* b) {
+    return strcmp(a, b);
+}
+
+static void* memchr(const void* s, int c, unsigned int n) {
+    const unsigned char* p = (const unsigned char*)s;
+    for (unsigned int i = 0; i < n; i++)
+        if (p[i] == (unsigned char)c) return (void*)(p + i);
+    return 0;
+}
