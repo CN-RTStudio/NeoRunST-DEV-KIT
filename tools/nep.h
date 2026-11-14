@@ -71,6 +71,15 @@ static inline long nep_read_line(char* buf, long maxlen) {
     return r;
 }
 
+// 非阻塞读一行: 没有整行输入立即返回 -1 (不挂起), 有则返回行长度。
+// 用于"边等后台输出边收键盘"的程序 (如终端); 普通交互用 nep_read_line
+static inline long nep_read_line_nb(char* buf, long maxlen) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(37L), "D"(buf), "S"(maxlen) : "memory");
+    return r;
+}
+
 // ── 窗口关闭回调 ──
 // 用户点窗口 X 后: 内核把程序上下文改写为直接进入 cb(win_id)。
 // cb 返回值 (rax): 非 0 = 关闭 (内核自动 EXIT 结束程序);
@@ -195,6 +204,9 @@ typedef struct {
     const char* text;           // label/button 文字 (input = 初始内容)
     void (*on_click)(int widget_id);  // 按钮回调 (其他控件填 0)
     void* tramp;                // 内部用: 回调返回后的落点, widget_add 自动填
+    int  font_id;               // label 可选: 字体句柄 (nep_font_open 返回值;
+                                //   0 = 系统字体)。input/button 忽略
+    int  font_size;             // label 可选: 像素字号 (0 = 默认 16, 4..96)
 } nep_widget_info;
 
 static inline int nep_widget_add(int win_id, nep_widget_info* info) {
@@ -423,4 +435,104 @@ static inline long nep_win_get_size(int win_id) {
     long r;
     __asm__ volatile("int $0x80" : "=a"(r) : "a"(30L), "D"((long)win_id) : "memory");
     return r;
+}
+
+// ── 字体句柄 (syscall 31/32): 程序自备 TTF 字体 ──
+// 打开字体文件 (路径同文件 syscall, ≤4MB) 并解析缓存。
+// → 句柄 (1..4), <0 = 文件不存在/不是有效 TTF/槽位占满。
+// 句柄不随程序退出自动回收, 退出前建议 nep_font_close
+static inline int nep_font_open(const char* path) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(31L), "D"(path) : "memory");
+    return (int)r;
+}
+
+static inline int nep_font_close(int handle) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(32L), "D"((long)handle) : "memory");
+    return (int)r;
+}
+
+// ═══ NEP 终端会话 (33~36): 不开内置终端窗口, 自己的程序就是终端 ═══
+// 会话按调用程序的 pid 区分 (各程序完全隔离, 读不到别人的输出/输入)。
+// 典型流程: term_exec(cmd) → 循环 term_done()/term_read() → 完成后收尾。
+// nep 命令寄宿的控制台程序: 输出进会话 (term_read 取), 输入用
+// term_write 提交 (它的 scanf/READ_LINE 读走)。
+
+// 提交一条命令 (异步: 入队立即返回, 系统在后台执行, 不阻塞本程序)。
+// 0 = 已入队; -2 = 上一条还没执行完; <0 = 命令串非法/过长
+static inline int nep_term_exec(const char* cmd) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(33L), "D"(cmd) : "memory");
+    return (int)r;
+}
+
+// 是否执行完: 1 = 命令跑完且它启动的 nep 程序都已退出; 0 = 还没完
+static inline int nep_term_done(void) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(34L) : "memory");
+    return (int)r;
+}
+
+// 增量取命令输出 (从上次取走的位置继续; 拿不下的下次接着取)。
+// 返回字节数 (0 = 暂无新输出), buf 收 NUL 结尾串
+static inline int nep_term_read(char* buf, int cap) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(35L), "D"(buf), "S"((long)cap) : "memory");
+    return (int)r;
+}
+
+// 提交一行输入: 回显进会话, 并交给会话里最新启动的寄宿程序
+// (它的 scanf/READ_LINE 读走; 没有寄宿程序时只回显, 无副作用)
+static inline void nep_term_write(const char* line) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(36L), "D"(line) : "memory");
+    (void)r;
+}
+
+// ── 网络 (syscall 38-42; TCP 精简版 + ping) ──
+// 阻塞语义: 等待期间任务挂起 (不耗时间片), 其他程序正常跑。
+// ip = 4 字节数组 (a.b.c.d 各一字节)。同时最多 4 条 TCP 连接。
+
+// 建立连接 (含 ARP + SYN 握手, 最多等 ~8s)。
+// 返回句柄 0..3; -1=表满/NIC, -2=ARP 失败, -3=被 RST, -4=超时
+static inline int nep_net_connect(const unsigned char ip[4], int port) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(38L), "D"(ip), "S"((long)port) : "memory");
+    return (int)r;
+}
+
+// 发送 ≤1400 字节并等对方确认 (重传自动; 总超时 10s)。0 = 成功
+static inline int nep_net_send(int h, const void* buf, int len) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(39L), "D"((long)h), "S"(buf), "d"((long)len) : "memory");
+    return (int)r;
+}
+
+// 收数据 (等待期间挂起)。返回字节数; 0 = 对端关闭 (EOF);
+// -1 = 超时; -3 = 连接失效。一次最多取 1400 字节
+static inline int nep_net_recv(int h, void* buf, int len, int timeout_ms) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(40L), "D"((long)h), "S"(buf), "d"((long)len),
+                       "c"((long)timeout_ms) : "memory");
+    return (int)r;
+}
+
+// 关闭连接 (发 FIN 等确认, 最多 5s)。0 = 成功
+static inline int nep_net_close(int h) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(41L), "D"((long)h) : "memory");
+    return (int)r;
+}
+
+// ping (阻塞, count 次, 每个 1s 超时)。返回成功次数; -1=已有 ping 在跑, -2=NIC
+static inline int nep_ping(const unsigned char ip[4], int count) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(42L), "D"(ip), "S"((long)count) : "memory");
+    return (int)r;
 }

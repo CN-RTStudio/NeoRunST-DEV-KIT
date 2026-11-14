@@ -2,7 +2,7 @@
 
 NEP (NeoRunST Executable Program) 是 NeoRunST 的用户程序格式，运行在
 ring3，**每进程独立地址空间**，任务/窗口数量无上限，抢占式调度。
-开发者工具包 MIT 许可，见仓库根目录 LICENSE。
+MIT 许可，见仓库根目录 LICENSE。
 
 ## 目录结构（开发者拿到的解压目录）
 
@@ -14,7 +14,7 @@ dev/
 │                  以及 fopen 系列文件操作 (FILE / fread / fwrite / remove / mkdir)
 ├── string.h       字符串/内存: strcpy / strcmp / memset / memcpy 等 (标准语义)
 ├── runst.h        应用主 API (类似 windows.h): 窗口、控件、消息框、控制台、
-│                  system(执行终端命令)、程序退出
+│                  system(执行终端命令)、网络 (TCP/ping)、程序退出
 ├── buildnep.exe   构建工具 — 直接双击/命令行用, 不需要 make 或其他脚本
 └── tools/         (隐藏, 开发者不动 — 内含 nep.h、crt0.c 等所有依赖)
 ```
@@ -48,6 +48,7 @@ buildnep.exe 会自动定位 tools\ 与本目录，把所有头都加进搜索�
 | `program_exit()` | 结束程序 |
 | `window_wait()` | 事件等待 (窗口程序主循环: 按钮回调/X 由内核直接唤醒) |
 | `reg_get / reg_set / reg_del_value / reg_del_key / reg_list / reg_create_key` | 注册表读写 (default.rreg, 见下) |
+| `net_connect / net_send / net_recv / net_close / net_parse_ip / ping` | 网络: TCP 客户端 + ICMP ping (见"网络"一节) |
 
 ### 消息框 (runst.h)
 
@@ -124,6 +125,51 @@ reg_create_key("app\\myapp\\sub");                 // 建键 (路径逐级自动
 - 区分 `reg_list` 列出的名字是子键还是值: 对它试 `reg_get`,
   能读到就是值, 读不到就是子键
 - 完整示例见 `regdemo.c` (构建后点击运行, 同时演示五种类型读写/删除/隔离性)
+
+### 网络 (runst.h)
+
+简易阻塞式 TCP + ping, 走 syscall 38~42 (等待期间任务挂起, 不耗 CPU,
+桌面照常响应)。单次 send/recv ≤ 1400 字节; 系统同时最多 4 条 TCP 连接。
+
+```c
+#include "runst.h"
+
+unsigned char ip[4];
+if (net_parse_ip("10.0.2.2", ip) == 0) {
+    int h = net_connect(ip, 80);              // TCP 连接, <0 失败
+    if (h >= 0) {
+        net_send(h, "GET / HTTP/1.0\r\nHost: x\r\n\r\n", 28);
+        char buf[1401];
+        for (;;) {
+            int n = net_recv(h, buf, 1400, 5000);
+            if (n <= 0) break;                // 0 = 对端关闭(EOF), <0 = 超时/重置
+            buf[n] = 0;
+            printf("%s", buf);
+        }
+        net_close(h);
+    }
+}
+
+int ok = ping(ip, 3);                         // ping 3 次, 返回成功次数
+```
+
+| 函数 | 说明 |
+|------|------|
+| `net_parse_ip(s, out[4])` | 解析点分十进制 IP, 0 = 成功 |
+| `net_connect(ip[4], port)` | 建立 TCP 连接 (含 ARP/握手), 返回句柄 <0 失败 |
+| `net_send(h, buf, len)` | 发送 ≤1400 字节并等对方确认 (自动重传, 总超时 10s), 0 = 成功 |
+| `net_recv(h, buf, len, timeout_ms)` | 收数据: >0 字节数, 0 = 对端关闭 (EOF), -1 = 超时, -3 = 连接被重置 |
+| `net_close(h)` | 关闭连接 (发 FIN 等确认, 最多 5s) |
+| `ping(ip[4], count)` | ping count 次 (每个 1s 超时), 返回成功次数; -1 = 已有 ping 在跑, -2 = 网卡未就绪 |
+
+注意事项:
+
+- 这是**精简版 TCP** (停等发送、按序接收、固定窗口), 适合请求-响应类
+  简单协议 (HTTP GET / 自定义协议); 大文件传输、高并发不要用它
+- 连接句柄 <0 时的错误码: -1 = 连接表满/网卡未就绪, -2 = ARP 失败,
+  -3 = 被 RST, -4 = 握手超时
+- 宿主机 ping 虚机里的系统是可以的 (系统内核自带 ARP/ICMP Echo 应答),
+  虚机自己的 IP 看 "hello net" 窗口的 DHCP 信息
 
 ### string.h (字符串/内存)
 

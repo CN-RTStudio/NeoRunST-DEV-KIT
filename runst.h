@@ -111,6 +111,45 @@ static inline int system(const char* cmd) {
     return nep_system(cmd);
 }
 
+// ── 终端会话: 让自己的程序充当终端 (NEP 终端就用这套) ──
+// 命令在会话里执行 (不开内置终端窗口), 输出用 term_read 增量取回,
+// 会话按程序隔离 (每个程序只能看到自己的命令输出)。
+// 典型循环:
+//     term_exec("ls");                     // 提交命令 (异步)
+//     while (!term_done()) {               // 等执行完 (含它启动的 nep 程序)
+//         char buf[256];
+//         int n = term_read(buf, sizeof(buf));   // 增量取输出
+//         if (n > 0) printf("%s", buf);
+//     }
+// 会话里用 nep 启动的控制台程序: 输出也在 term_read 里;
+// 要喂输入时 term_write("一行文本") (程序的 scanf/READ_LINE 读走)。
+
+// 提交命令。0 = 已入队; -2 = 上一条还没执行完; <0 = 命令非法/过长
+static inline int term_exec(const char* cmd) {
+    return nep_term_exec(cmd);
+}
+
+// 1 = 当前命令执行完 (且它启动的 nep 程序都已退出), 0 = 还没完
+static inline int term_done(void) {
+    return nep_term_done();
+}
+
+// 增量取输出。返回字节数 (0 = 暂无新输出), buf 收 NUL 结尾串
+static inline int term_read(char* buf, int cap) {
+    return nep_term_read(buf, cap);
+}
+
+// 提交一行输入 (回显 + 交给会话里最新启动的寄宿程序读走)
+static inline void term_write(const char* line) {
+    nep_term_write(line);
+}
+
+// 非阻塞读一行控制台输入: 没有整行立即返回 -1 (不挂起), 有则返回长度。
+// 终端类程序"边等命令输出边收键盘"时用它 (否则互相等会死锁)
+static inline long console_read_nb(char* buf, long maxlen) {
+    return nep_read_line_nb(buf, maxlen);
+}
+
 // ── 事件等待 (窗口程序主循环) ──
 
 // 窗口程序没有更多事可做时用它挂住自己:
@@ -181,4 +220,48 @@ static inline long reg_list(const char* path, char* buf, long maxlen) {
 // 创建键 (逐级自动建, 已存在也成功)。0 = 成功
 static inline long reg_create_key(const char* path) {
     return nep_reg_create_key(path);
+}
+
+// ── 网络 (TCP + ping) ──
+// 简易阻塞式 TCP: connect → send/recv 循环 → close。
+// 等待期间任务挂起 (抢占式调度), 不消耗 CPU, 桌面照常响应。
+// 单次 send/recv ≤1400 字节; 一次只支持少数并发连接 (内核 TCP_MAX=4)。
+
+// 建立 TCP 连接, 返回连接句柄 (<0 失败, 含 ARP/DHCP 未就绪等)
+static inline int net_connect(const unsigned char ip[4], int port) {
+    return nep_net_connect(ip, port);
+}
+
+// 发送数据 (自动重传, 总超时 10s)。0 = 成功
+static inline int net_send(int h, const void* buf, int len) {
+    return nep_net_send(h, buf, len);
+}
+
+// 收数据。返回字节数; 0 = 对端关闭 (EOF); -1 = 超时; -3 = 连接失效。
+// 一次最多取 1400 字节, 大响应循环调用直到 0
+static inline int net_recv(int h, void* buf, int len, int timeout_ms) {
+    return nep_net_recv(h, buf, len, timeout_ms);
+}
+
+// 关闭连接 (发 FIN, 最多等 5s)。0 = 成功
+static inline int net_close(int h) {
+    return nep_net_close(h);
+}
+
+// 解析点分十进制 IP ("10.0.2.2" → out[4])。0 = 成功, <0 = 格式错
+static inline int net_parse_ip(const char* s, unsigned char out[4]) {
+    for (int i = 0; i < 4; i++) {
+        unsigned v = 0; int n = 0;
+        while (*s >= '0' && *s <= '9' && n < 3) { v = v * 10 + (*s - '0'); s++; n++; }
+        if (n == 0 || v > 255) return -1;
+        out[i] = (unsigned char)v;
+        if (i < 3) { if (*s != '.') return -1; s++; }
+    }
+    return (*s == '\0') ? 0 : -1;
+}
+
+// ping (阻塞, count 次, 每个 1s 超时, 中文 Windows 风格输出打在本程序
+// 控制台)。返回成功次数; -1 = 已有 ping 在跑, -2 = 网卡未就绪
+static inline int ping(const unsigned char ip[4], int count) {
+    return nep_ping(ip, count);
 }
