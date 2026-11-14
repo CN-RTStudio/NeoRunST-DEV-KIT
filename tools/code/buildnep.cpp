@@ -252,58 +252,6 @@ int main(int argc, char** argv) {
     if (!read_file(binpath, image)) die("镜像读取失败");
 
     if (image.empty()) die("镜像为空");
-
-    // ── .bss 垫零: 平坦镜像必须覆盖全部 ALLOC 段 (含 NOBITS 的 .bss) ──
-    // objcopy -O binary 只输出有 CONTENTS 的段; 若孤儿段 (.eh_frame 等)
-    // 被 ld 排在 .bss 之前, 二进制会在 .bss 之前截断 → 运行时 .bss 区域
-    // 未映射, 程序一碰零初始化静态变量就 #PF (旧 binutils 排序不同,
-    // .bss 间隙被零填进镜像, 所以旧程序能跑)。这里解析 ELF 段表, 把
-    // 镜像补零到最后一个 ALLOC 段的末尾, 内核加载器逐页清零, 零成本。
-    {
-        std::vector<unsigned char> elfbuf;
-        if (!read_file(elf, elfbuf)) die("ELF 读取失败");
-        if (elfbuf.size() < 64) die("ELF 过小");
-        auto rd16 = [&](size_t o) -> unsigned {
-            return elfbuf[o] | (elfbuf[o + 1] << 8);
-        };
-        auto rd32 = [&](size_t o) -> unsigned {
-            return (unsigned)elfbuf[o] | ((unsigned)elfbuf[o + 1] << 8) |
-                   ((unsigned)elfbuf[o + 2] << 16) |
-                   ((unsigned)elfbuf[o + 3] << 24);
-        };
-        auto rd64 = [&](size_t o) -> unsigned long long {
-            return (unsigned long long)rd32(o) |
-                   ((unsigned long long)rd32(o + 4) << 32);
-        };
-        unsigned long long shoff     = rd64(0x28);
-        unsigned          shentsize  = rd16(0x3A);
-        unsigned          shnum      = rd16(0x3C);
-        unsigned long long max_end    = base;   // 镜像应覆盖到的 VMA 末尾
-        for (unsigned s = 0; s < shnum && shoff + (unsigned long long)s * shentsize + 64 <= elfbuf.size(); s++) {
-            size_t sh = shoff + (size_t)s * shentsize;
-            unsigned sh_type  = rd32(sh + 4);
-            unsigned long long sh_flags = rd64(sh + 8);
-            unsigned long long sh_addr  = rd64(sh + 16);
-            unsigned long long sh_size  = rd64(sh + 32);
-            (void)sh_type;
-            if (!(sh_flags & 0x2)) continue;          // SHF_ALLOC
-            if (sh_addr < base || sh_addr + sh_size <= base) continue;
-            unsigned long long end = sh_addr + sh_size;
-            if (end > max_end) max_end = end;
-        }
-        unsigned long long need = max_end - base;
-        if (need > (unsigned long long)MAX_IMAGE) {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf),
-                          "镜像+%lu 字节 (含 .bss), 超过上限 %lu",
-                          (unsigned long)need, MAX_IMAGE);
-            die(buf);
-        }
-        if (image.size() < need) {
-            image.resize((size_t)need, 0);   // .bss 区域垫零
-        }
-    }
-
     if (image.size() > MAX_IMAGE) {
         char buf[128];
         std::snprintf(buf, sizeof(buf), "镜像 %zu 字节, 超过上限 %lu",
