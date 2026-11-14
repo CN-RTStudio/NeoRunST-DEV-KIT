@@ -100,16 +100,93 @@ static __attribute__((unused)) double difftime(time_t a, time_t b) {
     return (double)a - (double)b;
 }
 
+static __attribute__((unused)) long long nr_timegm_days(int y, int m, int d) {
+    return nr_days_from_civil(y, m, d);
+}
+
+static __attribute__((unused)) struct tm* gmtime_r(const time_t* t, struct tm* out) {
+    if (!t || !out) return NULL;
+    nr_fill_tm(out, *t);
+    return out;
+}
+
+static __attribute__((unused)) struct tm* localtime_r(const time_t* t, struct tm* out) {
+    return gmtime_r(t, out);
+}
+
+static int nr_put_2(char* b, int v) {
+    b[0] = (char)('0' + (v / 10) % 10);
+    b[1] = (char)('0' + v % 10);
+    return 2;
+}
+
+static __attribute__((unused)) char* asctime_r(const struct tm* tm, char* buf) {
+    if (!tm || !buf) return NULL;
+    int o = 0;
+    const char* w = nr_wday_abbr[tm->tm_wday % 7];
+    for (int i = 0; w[i] && i < 3; i++) buf[o++] = w[i];
+    buf[o++] = ' ';
+    const char* mn = nr_mon_abbr[tm->tm_mon % 12];
+    for (int i = 0; mn[i] && i < 3; i++) buf[o++] = mn[i];
+    buf[o++] = ' ';
+    buf[o] = (char)('0' + (tm->tm_mday / 10) % 10); o++;
+    buf[o] = (char)('0' + tm->tm_mday % 10); o++;
+    buf[o++] = ' ';
+    o += nr_put_2(buf + o, tm->tm_hour);
+    buf[o++] = ':';
+    o += nr_put_2(buf + o, tm->tm_min);
+    buf[o++] = ':';
+    o += nr_put_2(buf + o, tm->tm_sec);
+    buf[o++] = ' ';
+    int y = tm->tm_year + 1900;
+    char n[6];
+    int k = 0;
+    if (y <= 0) n[k++] = '0';
+    while (y > 0) { n[k++] = (char)('0' + y % 10); y /= 10; }
+    while (k > 0 && o < 25) buf[o++] = n[--k];
+    buf[o++] = '\n';
+    buf[o] = 0;
+    return buf;
+}
+
+static __attribute__((unused)) __attribute__((section(".data"))) char nr_asctime_buf[32];
+
+static __attribute__((unused)) char* asctime(const struct tm* tm) {
+    return asctime_r(tm, nr_asctime_buf);
+}
+
+static __attribute__((unused)) char* ctime_r(const time_t* t, char* buf) {
+    if (!t) return NULL;
+    struct tm tmp;
+    if (!gmtime_r(t, &tmp)) return NULL;
+    return asctime_r(&tmp, buf);
+}
+
+static __attribute__((unused)) __attribute__((section(".data"))) char nr_ctime_buf[32];
+
+static __attribute__((unused)) char* ctime(const time_t* t) {
+    return ctime_r(t, nr_ctime_buf);
+}
+
+static __attribute__((unused)) time_t timegm(struct tm* tm) {
+    if (!tm) return 0;
+    long long days = nr_days_from_civil(tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+    long long secs = days * 86400 + (long long)tm->tm_hour * 3600
+                   + (long long)tm->tm_min * 60 + tm->tm_sec;
+    time_t out = (time_t)secs;
+    gmtime_r(&out, tm);
+    return out;
+}
+
+
 static __attribute__((section(".data"))) struct tm nr_gmtime_buf;
 static __attribute__((section(".data"))) struct tm nr_localtime_buf;
 
 static __attribute__((unused)) struct tm* gmtime(const time_t* t) {
-    nr_fill_tm(&nr_gmtime_buf, *t);
-    return &nr_gmtime_buf;
+    return gmtime_r(t, &nr_gmtime_buf);
 }
 static __attribute__((unused)) struct tm* localtime(const time_t* t) {
-    nr_fill_tm(&nr_localtime_buf, *t);
-    return &nr_localtime_buf;
+    return gmtime_r(t, &nr_localtime_buf);
 }
 
 // mktime: 按字段构造时间 (越界字段自动规范化, UTC)

@@ -9,6 +9,12 @@ static unsigned int strlen(const char* s) {
     return n;
 }
 
+static unsigned int strnlen(const char* s, unsigned int max) {
+    unsigned int n = 0;
+    while (n < max && s[n]) n++;
+    return n;
+}
+
 static char* strcpy(char* dst, const char* src) {
     char* d = dst;
     while ((*d++ = *src++)) ;
@@ -39,6 +45,19 @@ static int strncmp(const char* a, const char* b, unsigned int n) {
         if (a[i] != b[i] || !a[i]) return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
     }
     return 0;
+}
+
+static int strcasecmp(const char* a, const char* b) {
+    while (*a && *b) {
+        unsigned char x = (unsigned char)*a;
+        unsigned char y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x = (unsigned char)(x + 32);
+        if (y >= 'A' && y <= 'Z') y = (unsigned char)(y + 32);
+        if (x != y) return (int)x - (int)y;
+        a++;
+        b++;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 static const char* strchr(const char* s, int c) {
@@ -90,6 +109,14 @@ static void* memmove(void* dst, const void* src, unsigned int n) {
     return dst;
 }
 
+static void* memchr(const void* p, int v, unsigned int n) {
+    const unsigned char* d = (const unsigned char*)p;
+    for (unsigned int i = 0; i < n; i++) {
+        if (d[i] == (unsigned char)v) return (void*)(d + i);
+    }
+    return (void*)0;
+}
+
 static int memcmp(const void* a, const void* b, unsigned int n) {
     const unsigned char* x = (const unsigned char*)a;
     const unsigned char* y = (const unsigned char*)b;
@@ -99,37 +126,223 @@ static int memcmp(const void* a, const void* b, unsigned int n) {
     return 0;
 }
 
-// ── 字符集扫描 (Lua lstrlib / lobject 用) ──
-static unsigned int strspn(const char* s, const char* set) {
-    unsigned int n = 0;
-    for (; s[n]; n++) {
-        if (!strchr(set, s[n])) return n;
+static char* strncat(char* dst, const char* src, unsigned int n) {
+    char* d = dst;
+    while (*d) d++;
+    while (n-- && *src) *d++ = *src++;
+    *d = '\0';
+    return dst;
+}
+
+static unsigned int strlcpy(char* dst, const char* src, unsigned int cap) {
+    if (cap == 0) return strlen(src);
+    unsigned int i = 0;
+    while (i + 1 < cap && src[i]) {
+        dst[i] = src[i];
+        i++;
     }
-    return n;
+    dst[i] = '\0';
+    while (src[i]) i++;
+    return i;
 }
 
-static unsigned int strcspn(const char* s, const char* set) {
-    unsigned int n = 0;
-    for (; s[n]; n++) {
-        if (strchr(set, s[n])) return n;
+static unsigned int strlcat(char* dst, const char* src, unsigned int cap) {
+    unsigned int used = 0;
+    while (used < cap && dst[used]) used++;
+    if (used == cap) return cap + strlen(src);
+    unsigned int i = 0;
+    while (used + i + 1 < cap && src[i]) {
+        dst[used + i] = src[i];
+        i++;
     }
-    return n;
+    dst[used + i] = '\0';
+    return used + strlen(src);
 }
 
-static char* strpbrk(const char* s, const char* set) {
-    for (; *s; s++)
-        if (strchr(set, *s)) return (char*)s;
-    return 0;
+static const char* strpbrk(const char* s, const char* accept) {
+    for (; *s; s++) {
+        const char* a = accept;
+        while (*a) {
+            if (*a == *s) return s;
+            a++;
+        }
+    }
+    return (const char*)0;
 }
 
-// 无 locale: strcoll 即 strcmp
+static unsigned int strspn(const char* s, const char* accept) {
+    unsigned int i = 0;
+    for (; s[i]; i++) {
+        const char* a = accept;
+        while (*a && *a != s[i]) a++;
+        if (!*a) break;
+    }
+    return i;
+}
+
+static unsigned int strcspn(const char* s, const char* reject) {
+    unsigned int i = 0;
+    for (; s[i]; i++) {
+        const char* r = reject;
+        while (*r && *r != s[i]) r++;
+        if (*r) break;
+    }
+    return i;
+}
+static char* nr_strchr(const char* s, int c) {
+    if (!s) return (char*)0;
+    for (; *s; s++) if (*s == (char)c) return (char*)s;
+    if ((char)c == '\0') return (char*)s;
+    return (char*)0;
+}
+
+static char* nr_strrchr(const char* s, int c) {
+    if (!s) return (char*)0;
+    const char* last = (char*)0;
+    for (;; s++) {
+        if (*s == (char)c) last = s;
+        if (!*s) break;
+    }
+    return (char*)last;
+}
+
+static char* nr_strstr(const char* hay, const char* needle) {
+    if (!hay || !needle) return (char*)0;
+    if (!*needle) return (char*)hay;
+    for (; *hay; hay++) {
+        const char* h = hay;
+        const char* n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char*)hay;
+    }
+    return (char*)0;
+}
+
+static char* nr_strpbrk(const char* s, const char* accept) {
+    if (!s || !accept) return (char*)0;
+    for (; *s; s++) {
+        const char* a = accept;
+        while (*a && *a != *s) a++;
+        if (*a) return (char*)s;
+    }
+    return (char*)0;
+}
+
+static void* memccpy(void* dst, const void* src, int stop, unsigned int n) {
+    if (!dst || !src) return (void*)0;
+    char* d = (char*)dst;
+    const char* s = (const char*)src;
+    for (unsigned int i = 0; i < n; i++) {
+        d[i] = s[i];
+        if (s[i] == (char)stop) return (void*)(d + i + 1);
+    }
+    return (void*)0;
+}
+
 static int strcoll(const char* a, const char* b) {
     return strcmp(a, b);
 }
 
-static void* memchr(const void* s, int c, unsigned int n) {
-    const unsigned char* p = (const unsigned char*)s;
-    for (unsigned int i = 0; i < n; i++)
-        if (p[i] == (unsigned char)c) return (void*)(p + i);
+static unsigned int strxfrm(char* dst, const char* src, unsigned int n) {
+    if (!src) return 0;
+    unsigned int len = (unsigned int)strlen(src);
+    if (dst && n) {
+        unsigned int i = 0;
+        for (; i + 1 < n && src[i]; i++) dst[i] = src[i];
+        dst[i] = '\0';
+    }
+    return len;
+}
+
+static void* mempcpy(void* dst, const void* src, unsigned int n) {
+    if (!dst || !src) return (void*)0;
+    char* d = (char*)dst;
+    const char* s = (const char*)src;
+    for (unsigned int i = 0; i < n; i++) d[i] = s[i];
+    return (void*)(d + n);
+}
+
+static char* strchrnul(const char* s, int c) {
+    if (!s) return (char*)0;
+    for (; *s; s++) if (*s == (char)c) return (char*)s;
+    return (char*)s;
+}
+
+static char* rawmemchr(const char* s, int c) {
+    if (!s) return (char*)0;
+    while (*s != (char)c) s++;
+    return (char*)s;
+}
+
+static void* memmem(const void* hay, unsigned int hayLen, const void* needle, unsigned int needleLen) {
+    if (!hay || !needle) return (void*)0;
+    if (needleLen == 0) return (void*)hay;
+    if (needleLen > hayLen) return (void*)0;
+    const char* h = (const char*)hay;
+    const char* n = (const char*)needle;
+    for (unsigned int i = 0; i + needleLen <= hayLen; i++) {
+        unsigned int j = 0;
+        while (j < needleLen && h[i + j] == n[j]) j++;
+        if (j == needleLen) return (void*)(h + i);
+    }
+    return (void*)0;
+}
+
+static char* strsep(char** sp, const char* delim) {
+    if (!sp || !*sp) return (char*)0;
+    char* start = *sp;
+    char* end = start + strcspn(start, delim);
+    if (*end) {
+        *end = '\0';
+        *sp = end + 1;
+    } else {
+        *sp = (char*)0;
+    }
+    return start;
+}
+
+static int strncasecmp(const char* a, const char* b, unsigned int n) {
+    if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);
+    for (unsigned int i = 0; i < n; i++) {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
+        if (ca != cb) return ca - cb;
+        if (!ca) return 0;
+    }
     return 0;
 }
+
+static char* stpcpy(char* dst, const char* src) {
+    if (!dst || !src) return (char*)0;
+    while ((*dst = *src)) { dst++; src++; }
+    return dst;
+}
+
+static char* strtok_r(char* s, const char* delim, char** save) {
+    if (!s) s = *save;
+    if (!s) return (char*)0;
+    s += strspn(s, delim);
+    if (!*s) {
+        *save = s;
+        return (char*)0;
+    }
+    char* end = s + strcspn(s, delim);
+    if (*end) {
+        *end = '\0';
+        *save = end + 1;
+    } else {
+        *save = end;
+    }
+    return s;
+}
+
+static char* strtok(char* s, const char* delim) {
+    static char* nr_tok_save = (char*)0;
+    return strtok_r(s, delim, &nr_tok_save);
+}
+
+#define strchr(s, c)   nr_strchr((s), (c))
+#define strrchr(s, c)  nr_strrchr((s), (c))
+#define strstr(h, n)   nr_strstr((h), (n))
+#define strpbrk(s, a)  nr_strpbrk((s), (a))
