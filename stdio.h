@@ -45,14 +45,22 @@ static unsigned int nr_strlen(const char* s) {
 // ── 格式化核心: 输出写入 out (容量 cap, 恒 NUL 结尾), 返回写入长度 ──
 __attribute__((unused))
 static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
-    int n = 0;
-    #define NR_PUT(c) do { if (n < cap - 1) out[n] = (c); n++; } while (0)
+    if (cap < 1) cap = 1;
+    long n = 0;
+    long room = (long)cap - 1;
+    #define NR_PUT(c) do { if (n < room) out[n] = (c); n++; } while (0)
     for (; *fmt; fmt++) {
         if (*fmt != '%') { NR_PUT(*fmt); continue; }
         fmt++;
         // 长度前缀
         int lng = 0;
         while (*fmt == 'l') { lng++; fmt++; }
+        int prec = -1;
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
+        }
         char c = *fmt;
         if (!c) break;
         if (c == '%') { NR_PUT('%'); continue; }
@@ -60,7 +68,8 @@ static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
         if (c == 's') {
             const char* s = va_arg(ap, const char*);
             if (!s) s = "(null)";
-            while (*s) NR_PUT(*s++);
+            int lim = 0;
+            while (*s && (prec < 0 || lim < prec)) { NR_PUT(*s++); lim++; }
             continue;
         }
         if (c == 'p') {
@@ -97,8 +106,8 @@ static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
         // 未知转换符: 原样输出
         NR_PUT('%'); NR_PUT(c);
     }
-    if (n < cap) out[(n < cap - 1) ? n : cap - 1] = '\0';
-    return (n < cap) ? n : cap - 1;
+    if (n < (long)cap) out[(n < room) ? n : room] = '\0';
+    return (int)((n < (long)cap) ? n : room);
     #undef NR_PUT
 }
 
@@ -116,9 +125,11 @@ static int sprintf(char* buf, const char* fmt, ...) {
 // 被截断时大于实际写入 — 同 C 标准, 可用于先探长度)
 __attribute__((unused))
 static int vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap) {
-    if (!buf || cap < 1) { buf = 0; }
-    int n = nr_vfmt(buf ? buf : (char*)"", buf && cap > 0 ? (int)cap : 1, fmt, ap);
-    return n;
+    if (!buf || cap < 1) {
+        char __nr_scratch[1];
+        return nr_vfmt(__nr_scratch, 1, fmt, ap);
+    }
+    return nr_vfmt(buf, (int)cap, fmt, ap);
 }
 
 __attribute__((unused))
@@ -160,7 +171,6 @@ static int printf(const char* fmt, ...) {
         if (saved == '\0') break;
         total++;                       // 计入换行本身
         p = nl + 1;
-        if (!saved) break;
     }
     return total;
 }
@@ -226,7 +236,7 @@ static int scanf(const char* fmt, ...) {
             if (*p == '-') { neg = 1; p++; }
             else if (*p == '+') p++;
             unsigned long long v = 0;
-            int any = 0;
+            int any = 0, over = 0;
             if (c == 'x') {
                 while (*p) {
                     int d;
@@ -234,14 +244,19 @@ static int scanf(const char* fmt, ...) {
                     else if (*p >= 'a' && *p <= 'f') d = *p - 'a' + 10;
                     else if (*p >= 'A' && *p <= 'F') d = *p - 'A' + 10;
                     else break;
-                    v = v * 16 + (unsigned)d; any = 1; p++;
+                    if (v > (0xFFFFFFFFFFFFFFFFULL - (unsigned)d) / 16) over = 1;
+                    else v = v * 16 + (unsigned)d;
+                    any = 1; p++;
                 }
             } else {
                 while (*p >= '0' && *p <= '9') {
-                    v = v * 10 + (unsigned)(*p - '0'); any = 1; p++;
+                    unsigned d = (unsigned)(*p - '0');
+                    if (v > (0xFFFFFFFFFFFFFFFFULL - d) / 10) over = 1;
+                    else v = v * 10 + d;
+                    any = 1; p++;
                 }
             }
-            if (!any) break;
+            if (!any || over) break;
             if (c == 'u') {
                 if (lng) { unsigned long* dst = va_arg(ap, unsigned long*); *dst = (unsigned long)v; }
                 else { unsigned int* dst = va_arg(ap, unsigned int*); *dst = (unsigned int)v; }
@@ -264,21 +279,29 @@ static int scanf(const char* fmt, ...) {
 // ── 数值 / 随机数工具 (系统可直接支持的部分) ──
 
 static int atoi(const char* s) {
-    int r = 0, neg = 0;
+    long long r = 0; int neg = 0;
     while (*s == ' ' || *s == '\t') s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
-    while (*s >= '0' && *s <= '9') { r = r * 10 + (*s - '0'); s++; }
-    return neg ? -r : r;
+    while (*s >= '0' && *s <= '9') {
+        if (r < 2147483648LL) r = r * 10 + (*s - '0');
+        s++;
+    }
+    if (neg) return r >= 2147483648LL ? (-2147483647 - 1) : (int)-r;
+    return r > 2147483647LL ? 2147483647 : (int)r;
 }
 
 static long atol(const char* s) {
-    long r = 0; int neg = 0;
+    long long r = 0; int neg = 0;
     while (*s == ' ' || *s == '\t') s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
-    while (*s >= '0' && *s <= '9') { r = r * 10 + (*s - '0'); s++; }
-    return neg ? -r : r;
+    while (*s >= '0' && *s <= '9') {
+        if (r < 922337203685477580LL) r = r * 10 + (*s - '0');
+        s++;
+    }
+    if (neg) return r >= 9223372036854775807LL ? (long)(-9223372036854775807LL - 1) : (long)-r;
+    return r > 9223372036854775807LL ? (long)9223372036854775807LL : (long)r;
 }
 
 static int abs(int v) { return v < 0 ? -v : v; }
@@ -347,6 +370,7 @@ __attribute__((unused))
 static size_t fread(void* ptr, size_t sz, size_t n, FILE* f) {
     if (!f || f->fd <= 0 || !ptr || sz == 0 || n == 0) return 0;
     unsigned long long total = (unsigned long long)sz * n;
+    if (total > (sizeof(long) == 4 ? 0x7FFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL)) { f->err = 1; return 0; }
     long r = nep_file_read(f->fd, ptr, (long)total);
     if (r < 0) { f->err = 1; return 0; }
     if ((unsigned long long)r < total) f->eof = 1;
@@ -358,6 +382,7 @@ __attribute__((unused))
 static size_t fwrite(const void* ptr, size_t sz, size_t n, FILE* f) {
     if (!f || f->fd <= 0 || !ptr || sz == 0 || n == 0) return 0;
     unsigned long long total = (unsigned long long)sz * n;
+    if (total > (sizeof(long) == 4 ? 0x7FFFFFFFULL : 0x7FFFFFFFFFFFFFFFULL)) { f->err = 1; return 0; }
     long r = nep_file_write(f->fd, ptr, (long)total);
     if (r < 0) { f->err = 1; return 0; }
     if ((unsigned long long)r < total) f->err = 1;
@@ -478,8 +503,13 @@ static int putchar(int ch) {
     static __attribute__((section(".data"))) char __pb[118];   // 内核单行缓冲 120 字节, 留 2 字节余量 (须落 .data, 见 FILE 池注释)
     static __attribute__((section(".data"))) int  __pl = 0;
     char c = (char)ch;
+    if (__pl >= (int)sizeof(__pb) - 1) {
+        __pb[(int)sizeof(__pb) - 1] = '\0';
+        nep_win_print(-1, __pb);
+        __pl = 0;
+    }
     __pb[__pl++] = c;
-    if (c == '\n' || __pl >= (int)sizeof(__pb) - 1) {
+    if (c == '\n') {
         __pb[__pl] = '\0';
         nep_win_print(-1, __pb);
         __pl = 0;
