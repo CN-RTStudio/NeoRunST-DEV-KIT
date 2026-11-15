@@ -596,8 +596,11 @@ static long atol(const char* s) {
     return neg ? -r : r;
 }
 
+#ifndef __NR_ABS_DEFINED
+#define __NR_ABS_DEFINED 1
 static int abs(int v) { return v < 0 ? -v : v; }
 static long labs(long v) { return v < 0 ? -v : v; }
+#endif
 
 // LCG 伪随机数 (跨 syscall 状态保存在程序自己的静态区)
 static unsigned long long __rand_seed = 0x2545F4914F6CDD1DULL;
@@ -883,4 +886,122 @@ static int putchar(int ch) {
 __attribute__((unused))
 static void perror(const char* s) {
     nep_win_print_color(-1, (s && *s) ? s : "error", CONSOLE_RED);
+}
+
+// ── fprintf / stdin / stdout / stderr (DOOM 等大程序用) ──
+// 没有 libc 流概念: stdin/stdout/stderr 是 NULL 哨兵, fprintf 分流 —
+// NULL → 控制台 printf, 其余 → fputs 写文件流
+#define stdin  ((FILE*)0)
+#define stdout ((FILE*)0)
+#define stderr ((FILE*)0)
+
+__attribute__((unused))
+static int vfprintf(FILE* f, const char* fmt, va_list ap) {
+    char buf[512];
+    nr_vfmt(buf, sizeof(buf), fmt, ap);
+    if (!f) return printf("%s", buf);      // stdout/stderr → 控制台
+    return fputs(buf, f);
+}
+
+__attribute__((unused))
+static int fprintf(FILE* f, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfprintf(f, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+// ── sscanf (最小实现): 支持 %d %i %u %x %o %s %c %% 与空白/字面匹配。
+// DOOM 的配置/DEH 解析只用整数转换, 够用。返回成功赋值数
+static int nr_ss_isspace(int c) {
+    return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
+__attribute__((unused))
+static int vsscanf(const char* s, const char* fmt, va_list ap) {
+    int assigned = 0;
+    while (*fmt) {
+        if (nr_ss_isspace(*fmt)) {              // 格式空白: 跳过输入空白
+            while (nr_ss_isspace(*s)) s++;
+            fmt++;
+            continue;
+        }
+        if (*fmt != '%') {                      // 字面字符: 必须精确匹配
+            if (*s != *fmt) break;
+            s++; fmt++;
+            continue;
+        }
+        fmt++;
+        if (*fmt == '%') {                      // %%: 匹配一个 '%'
+            if (*s != '%') break;
+            s++; fmt++;
+            continue;
+        }
+        int suppress = (*fmt == '*');
+        if (suppress) fmt++;
+        while (nr_ss_isspace(*s)) s++;          // 转换前跳空白
+        if (*fmt == 'x' || *fmt == 'X') {
+            unsigned v = 0; int n = 0;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+            while (*s) {
+                int d;
+                if (*s >= '0' && *s <= '9') d = *s - '0';
+                else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+                else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+                else break;
+                v = v * 16 + (unsigned)d; n++; s++;
+            }
+            if (!n) break;
+            if (!suppress) { *va_arg(ap, unsigned*) = v; assigned++; }
+        } else if (*fmt == 'd' || *fmt == 'i' || *fmt == 'u' || *fmt == 'o') {
+            int neg = 0, base = 10, n = 0;
+            long v = 0;
+            if (*s == '-' || *s == '+') { neg = (*s == '-'); s++; }
+            if (*fmt == 'o') base = 8;
+            if (*fmt == 'i' && s[0] == '0') {    // %i: 0x 前缀 = 16 进制
+                if (s[1] == 'x' || s[1] == 'X') { base = 16; s += 2; }
+                else { base = 8; }
+            }
+            while (*s) {
+                int d;
+                if (*s >= '0' && *s <= '9') d = *s - '0';
+                else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+                else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+                else break;
+                if (d >= base) break;
+                v = v * base + d; n++; s++;
+            }
+            if (!n) break;
+            if (neg) v = -v;
+            if (!suppress) { *va_arg(ap, int*) = (int)v; assigned++; }
+        } else if (*fmt == 's') {
+            if (!*s) break;
+            if (!suppress) {
+                char* d = va_arg(ap, char*);
+                while (*s && !nr_ss_isspace(*s)) *d++ = *s++;
+                *d = '\0';
+                assigned++;
+            } else {
+                while (*s && !nr_ss_isspace(*s)) s++;
+            }
+        } else if (*fmt == 'c') {
+            if (!*s) break;
+            if (!suppress) { *va_arg(ap, char*) = *s; assigned++; }
+            s++;
+        } else {
+            break;                               // 未知转换: 停止
+        }
+        fmt++;
+    }
+    return assigned;
+}
+
+__attribute__((unused))
+static int sscanf(const char* s, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsscanf(s, fmt, ap);
+    va_end(ap);
+    return n;
 }

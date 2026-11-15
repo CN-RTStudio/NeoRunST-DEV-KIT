@@ -5,6 +5,7 @@
 // strtod 在 dev\lua\main.c 里提供非 static 实现 (数字解析核心)。
 
 #include "heap.h"
+#include "string.h"      // strlen/memcpy (strdup 用)
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -43,3 +44,18 @@ static __attribute__((unused)) char* tmpnam(char* buf) {
 
 // 数字 → 字符串解析 (main.c 实现, 支持 10/16 进制, inf/nan)
 double strtod(const char* s, char** end);
+
+// ── DOOM 等大程序用 (abs/labs 已在 dev\stdio.h, 双方共用防重宏)
+#ifndef __NR_ABS_DEFINED
+#define __NR_ABS_DEFINED 1
+static inline int abs(int a) { return a < 0 ? -a : a; }
+static inline long labs(long a) { return a < 0 ? -a : a; }
+#endif
+static inline double atof(const char* s) { return strtod(s, (char**)0); }
+
+static __attribute__((unused)) char* strdup(const char* s) {
+    unsigned long n = (unsigned long)strlen(s) + 1;
+    char* p = (char*)malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}

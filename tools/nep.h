@@ -44,6 +44,44 @@ static inline long nep_ticks(void) {
     return r;
 }
 
+// 毫秒级休眠 (syscall 45): 挂起任务, 到点由内核唤醒, 等待不耗 CPU。
+// 0 = 成功
+static inline int nep_sleep(long ms) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(45L), "D"(ms) : "memory");
+    return (int)r;
+}
+
+// ── 原始键盘事件 (syscall 46; DOOM 等游戏程序用) ──
+// 焦点窗口的每次按键 (按下/释放/修饰键/方向键等扩展键) 都进内核队列,
+// 程序轮询取走。scancode 是 set-1 make code (0xE0 前缀和 0x80 break 位
+// 已剥离; 方向键 Up/Down/Left/Right = 0x48/0x50/0x4B/0x4D, ext=1)
+typedef struct {
+    unsigned char scancode;
+    unsigned char ext;    // 1 = 0xE0 扩展键
+    unsigned char down;   // 1 = 按下, 0 = 释放
+    unsigned char shift, ctrl, alt;
+    char ascii;           // 对应字符 (0 = 无)
+    unsigned char _pad;
+} nep_key_event;
+
+// 从窗口 raw 键队列取一个事件 → *ev。返回 1 = 取到, 0 = 队列空 (立即
+// 返回, 不挂起 — 主循环里轮询), <0 = 窗口非法
+static inline int nep_win_get_key(int win_id, nep_key_event* ev) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(46L), "D"((long)win_id), "S"(ev) : "memory");
+    return (int)r;
+}
+
+// 改窗口标题栏文字 (syscall 47)。0 = 成功
+static inline int nep_win_set_title(int win_id, const char* title) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(47L), "D"((long)win_id), "S"(title) : "memory");
+    return (int)r;
+}
+
 // 创建窗口, 返回窗口 id (<0 失败)。宽高会被内核夹取到合理范围
 static inline int nep_win_create(const char* title, int w, int h) {
     long r;

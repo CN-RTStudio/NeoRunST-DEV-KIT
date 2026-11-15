@@ -181,7 +181,7 @@ int ok = ping(ip, 3);                         // ping 3 次, 返回成功次数
 
 标准语义, freestanding 自实现: `strlen strcpy strncpy strcat strcmp strncmp
 strchr strrchr strstr memset memcpy memmove memcmp strspn strcspn strpbrk
-strcoll memchr`
+strcoll memchr strcasecmp strncasecmp`
 
 ### math.h (附加组件, 见 [NeoRunST-Math](https://github.com/NeoRunST/NeoRunST-Math))
 
@@ -201,14 +201,15 @@ buildnep.exe main.c tools\math\pow.c tools\math\log.c ... -o app.nep
 
 | 头 | 内容 |
 |------|------|
-| `stdlib.h` | `malloc/free/calloc/realloc` (来自 heap.h) / `exit/abort` / `getenv`(恒NULL) / `system`(恒失败) / `strtod` 需自实现 |
-| `heap.h` | 用户态堆: 每任务 1MB, `malloc` 家族, 状态落 .data |
+| `stdlib.h` | `malloc/free/calloc/realloc` (来自 heap.h) / `exit/abort` / `getenv`(恒NULL) / `system`(恒失败) / `atof` / `strdup`; `strtod` 需自实现 |
+| `heap.h` | 用户态堆: 每任务 16MB (内核按需映射物理页), `malloc` 家族, 状态落 .data |
 | `time.h` | `time_t / struct tm / time / clock / mktime / gmtime / localtime / difftime / strftime` (uptime 纪元, UTC) |
 | `ctype.h` | `isspace/isalpha/.../tolower/toupper` (纯 ASCII) |
 | `errno.h` | `errno` + 常用错误码 + `strerror` (通用 "error") |
 | `locale.h` | `"C"` locale, `localeconv` / `setlocale` |
 | `signal.h` | 仅占位 (无信号机制) |
 | `assert.h` | `assert` 为空操作 (freestanding 无 `__assert_fail`) |
+| `unistd.h / fcntl.h / inttypes.h / strings.h / sys\types.h / sys\stat.h` | 移植占位头: 只满足第三方代码的 `#include`, 功能走 stdio 的 fopen 系列或其他 shim |
 
 典型移植案例: **Lua 5.5.1 解释器** (见 neorunst-lua 仓库) 就建立在这套
 shim + math 之上。
@@ -251,6 +252,8 @@ shim + math 之上。
 | `cputs(win_id, s, color)` | 以任意颜色输出一行到窗口/控制台 (win_id<0 = 本程序控制台), 自动加换行 |
 | `CONSOLE_RED / GREEN / BLUE / YELLOW / GRAY` | cputs 用的颜色常量 (0x00RRGGBB) |
 | `scanf(fmt, ...)` | 从控制台读一行并解析; `%d %i %u %x %s %c`, 支持宽度如 `%63s` |
+| `fprintf / vfprintf` | 格式化写文件流; `fprintf(stderr, ...)` / `stdout` 分流到控制台 |
+| `sscanf / vsscanf` | 字符串解析 (最小实现): `%d %i %u %x %o %s %c %%`, 空白/字面匹配; `stdin/stdout/stderr` 为 NULL 哨兵, 供 fprintf 分流 |
 | `fopen / fclose / fread / fwrite / fseek / ftell / rewind / feof / ferror` | 文件读写 (见下) |
 | `fgetc / fputc / fgets / fputs / ungetc / getc` | 按字符/行读写文件 |
 | `remove / mkdir` | 删除文件 / 创建目录 |
@@ -302,7 +305,8 @@ mode 与 C 标准一致: `"r"` 读 / `"w"` 写 (清零, 自动创建) / `"a"` �
 
 注意事项:
 
-- 没有 `stdin/stdout/stderr` — 终端输出用 printf, 不要 fopen 它们
+- `stdin/stdout/stderr` 只是 fprintf 的分流哨兵 (NULL), **不能 fopen 或
+  fread** — 终端输出用 printf, 控制台输入用 scanf/console_read
 - **系统卷的 `runst/system` 子树对程序只读** (内核、注册表、系统配置
   都在那里): 读取 OK, 写/删除/建目录会被内核拒绝
 - 读到文件末尾 `fread`/`fgetc` 返回不足并把 `feof` 置位; `fseek` 成功
@@ -346,8 +350,39 @@ int nep_main(void) {
 |------|------|
 | `nep_win_draw_blit(win, x, y, w, h, pixels32)` | 把 32bpp (0xAARRGGBB) 像素块灌入窗口位图层, 内核每帧重绘时合成, 越界自动裁剪 |
 | `nep_win_get_size(win, &w, &h)` | 读窗口客户区尺寸 |
+| `nep_win_set_title(win, title)` | 改窗口标题栏文字 (syscall 47) |
 | `nep_on_shutdown(cb)` | 注册关机回调 `int cb(void)`: 返回 0 = 阻止关机, 非 0 = 同意退出; 关机流程会轮询等待 |
 | `nep_ticks()` | 开机毫秒数 (syscall 44), 计时/os.clock 类用途 |
+| `nep_sleep(ms)` | 毫秒级休眠 (syscall 45): 任务挂起到点唤醒, 等待不耗 CPU |
+
+### 原始键盘 (nep.h, 游戏类程序用)
+
+控制台/input 是按行取字符; 游戏需要的是**每一次按键事件** (按下/释放、
+方向键等扩展键、修饰键状态)。焦点窗口的所有按键都进内核 raw 队列,
+程序轮询取走 (不与文本输入冲突, 文本程序不读队列就无影响):
+
+```c
+#include "nep.h"
+
+nep_key_event ev;
+while (nep_win_get_key(win, &ev) == 1) {
+    if (ev.ext && ev.scancode == 0x4B && ev.down) {
+        // 左方向键按下 (释放时 ev.down == 0)
+    }
+}
+```
+
+| 函数/字段 | 说明 |
+|------|------|
+| `nep_win_get_key(win, &ev)` | 弹一个事件: 1 = 取到, 0 = 队列空 (立即返回不挂起), <0 = 窗口非法 |
+| `ev.scancode` | set-1 make code (0xE0 前缀和 0x80 break 位已剥离) |
+| `ev.ext` | 1 = 0xE0 扩展键; 方向键 Up/Down/Left/Right = 0x48/0x50/0x4B/0x4D |
+| `ev.down` | 1 = 按下, 0 = 释放 |
+| `ev.shift / ev.ctrl / ev.alt` | 事件时刻的修饰键状态 |
+| `ev.ascii` | 对应字符 (0 = 无; 仅按下且有映射时非 0) |
+
+典型用法见 [neorunst-doom](https://github.com/NeoRunST/neorunst-doom) 移植层
+(dg_nep.c): scancode → DOOM 键位映射表。
 
 ### 执行环境特性
 

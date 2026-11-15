@@ -32,7 +32,7 @@ static std::string TOOLS_DIR;            // dev\tools (crt0.c / nep.h 在这里)
 static std::string DEV_DIR;              // dev 根 (stdio.h 在这里)
 
 static const unsigned long long NEP_BASE    = 0x400000ULL;
-static const unsigned long        MAX_IMAGE = 512 * 1024;
+static const unsigned long        MAX_IMAGE = 4u * 1024 * 1024;
 
 static const char* LDSCRIPT =
     "/* 由 buildnep.cpp 生成 */\n"

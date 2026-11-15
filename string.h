@@ -133,3 +133,22 @@ static void* memchr(const void* s, int c, unsigned int n) {
         if (p[i] == (unsigned char)c) return (void*)(p + i);
     return 0;
 }
+
+// ── DOOM 等大程序用 ──
+static int strcasecmp(const char* a, const char* b) {
+    while (*a && *a == *b) { a++; b++; }
+    int ca = (unsigned char)*a, cb = (unsigned char)*b;
+    if (ca >= 'A' && ca <= 'Z') ca += 32;
+    if (cb >= 'A' && cb <= 'Z') cb += 32;
+    return ca - cb;
+}
+
+static int strncasecmp(const char* a, const char* b, unsigned int n) {
+    for (unsigned int i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb || !ca) return (int)ca - (int)cb;
+    }
+    return 0;
+}

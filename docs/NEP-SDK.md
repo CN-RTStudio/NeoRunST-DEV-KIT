@@ -261,7 +261,49 @@ int nep_main(void) {
 |------|------|
 | `nep_win_draw_blit(win, x, y, w, h, pixels32)` | 把 32bpp (0xAARRGGBB) 像素块灌入窗口位图层, 内核每帧重绘时合成, 越界自动裁剪 |
 | `nep_win_get_size(win, &w, &h)` | 读窗口客户区尺寸 |
+| `nep_win_set_title(win, title)` | 改窗口标题栏文字 (syscall 47) |
 | `nep_on_shutdown(cb)` | 注册关机回调 `int cb(void)`: 返回 0 = 阻止关机, 非 0 = 同意退出; 关机流程会轮询等待 |
+| `nep_ticks()` | 开机毫秒数 (syscall 44), 计时/os.clock 类用途 |
+| `nep_sleep(ms)` | 毫秒级休眠 (syscall 45): 任务挂起到点唤醒, 等待不耗 CPU |
+
+### 用户态异常处理器 (nep.h, syscall 48)
+
+类 Windows SEH 简化版: 注册 handler 后, 硬件异常 (Page Fault / GPF /
+除 0 等) 不再默认弹窗杀任务, 而是转入用户 handler。参考示例
+`except_test.c`:
+
+```c
+static void my_handler(long exc, unsigned long addr) {
+    // exc = CPU 异常号 (14=Page Fault, 13=GPF, 0=除 0 ...)
+    // addr = 出错地址 (仅 PF 时有效)
+    printf("caught exc=%ld addr=0x%lx\n", exc, addr);
+    nep_exit();   // handler 通常记录后干净退出
+}
+nep_except_set(my_handler);
+```
+
+规则:
+
+- handler 返回 = `ret` 到 0 → 再次异常 → 内核链式投递 (最多 3 层防死循环),
+  超限后仍走默认弹窗 + 杀任务
+- handler 里再崩也能被链式接住 (嵌套)
+- 传 0 = 注销, 恢复默认行为; 返回值 = 旧 handler
+
+### 原始键盘 (nep.h, 游戏类程序用, syscall 46)
+
+焦点窗口的每次按键 (按下/释放/修饰键/方向键等扩展键) 都进内核 raw
+队列, 程序轮询取走; 与控制台/input 的文本输入互不影响:
+
+```c
+nep_key_event ev;
+while (nep_win_get_key(win, &ev) == 1) {
+    if (ev.ext && ev.scancode == 0x4B && ev.down) { /* 左方向键按下 */ }
+}
+```
+
+返回 1 = 取到事件, 0 = 队列空 (立即返回), <0 = 窗口非法。
+`nep_key_event` 字段: `scancode` (set-1 make code, 前缀/break 位已剥离),
+`ext` (1 = 0xE0 扩展键), `down`, `shift/ctrl/alt`, `ascii` (0 = 无)。
 
 ### 执行环境特性
 

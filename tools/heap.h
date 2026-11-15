@@ -1,6 +1,6 @@
 #pragma once
 // ── NEP 用户态堆 (malloc/free/realloc/calloc) ──
-// 存储布局: 每个任务有一段独立虚拟地址区 [NEP_HEAP_BASE, +1MB),
+// 存储布局: 每个任务有一段独立虚拟地址区 [NEP_HEAP_BASE, +16MB),
 // 物理页由内核按需映射 (syscall 43 nep_heap_grow, 只增不减,
 // 任务退出时内核一次性回收全部页表/物理页)。
 // 分配算法: 分段链表 (header 前置, 相邻空闲合并, 不够时扩堆),
@@ -8,13 +8,14 @@
 // (平坦镜像不含 .bss, 未映射!)。
 //
 // 用法: #include "heap.h" 后直接 malloc/free/calloc/realloc。
-// 上限 1MB/进程, 超限 malloc 返回 0 (注意: 返回 0, 不是 NULL 宏)。
+// 上限 16MB/进程, 超限 malloc 返回 0 (注意: 返回 0, 不是 NULL 宏)。
 
 #include "nep.h"
+#include "stdio.h"      // nep_heap_dump 的 FILE (诊断用)
 
 #define NEP_HEAP_BASE_VA 0x0000300000000000ULL
 #define NEP_HEAP_CHUNK   0x10000        // 每次扩堆 64KB
-#define NEP_HEAP_LIMIT   (256UL * 0x1000 * 0x1000)   // 1MB (与内核一致)
+#define NEP_HEAP_LIMIT   (4096UL * 0x1000)   // 16MB (与内核一致; DOOM 需 ~6MB)
 
 typedef struct HeapSeg {
     unsigned long size;             // 数据区字节数 (不含 header)
@@ -23,11 +24,14 @@ typedef struct HeapSeg {
     unsigned long free;             // 1 = 空闲
 } HeapSeg;                          // 32 字节, 数据区 16 字节对齐保持
 
-// ── 堆状态: 必须落 .data (平坦镜像不映射 .bss, 零初始化默认进 .bss!) ──
-static __attribute__((section(".data"))) HeapSeg*    h__first = 0;
-static __attribute__((section(".data"))) HeapSeg*    h__last  = 0;
-static __attribute__((section(".data"))) unsigned long h__mapped = 0;  // 已映射字节数
-static __attribute__((section(".data"))) int          h__inited = 0;
+// ── 堆状态: 全局符号, crt0.c 定义 (落 .data, 平坦镜像不映射 .bss!)。
+// 必须 TU 间共享: heap 函数是 static 的 (每 TU 一份代码), 但堆 VA 区间
+// 是全进程唯一的 — 若状态也 per-TU, 多个编译单元各自 malloc 会互相
+// 覆盖分配区 (DOOM 5 个 TU 调 malloc → zone 被配置字符串写穿的教训) ──
+extern HeapSeg*        h__first;
+extern HeapSeg*        h__last;
+extern unsigned long   h__mapped;  // 已映射字节数
+extern int             h__inited;
 
 // 堆扩容到 total 字节 (内部用)。0 = 成功
 static int h__grow(unsigned long total) {
@@ -139,8 +143,18 @@ static void free(void* p) {
     h__merge_back(seg);
 }
 
-static void* calloc(unsigned long n, unsigned long size) {
-    unsigned long total = n * size;
+// [诊断] 打印堆 seg 链 (DOOM zone 调试用; 需要 stdio.h 先包含)
+static __attribute__((unused)) void nep_heap_dump(FILE* f) {
+    fprintf(f, "heap: mapped=%x first=%x last=%x\n",
+            (unsigned int)h__mapped,
+            (unsigned int)(unsigned long)h__first,
+            (unsigned int)(unsigned long)h__last);
+    for (HeapSeg* s = h__first; s; s = s->head)
+        fprintf(f, "  seg %x size=%x free=%x\n",
+                (unsigned int)(unsigned long)s, (unsigned int)s->size, s->free);
+}
+
+static void* calloc(unsigned long n, unsigned long size) {    unsigned long total = n * size;
     void* p = malloc(total);
     if (!p) return 0;
     for (unsigned long i = 0; i < total; i++) ((char*)p)[i] = 0;
