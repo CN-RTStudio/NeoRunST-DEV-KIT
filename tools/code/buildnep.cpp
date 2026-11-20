@@ -1,12 +1,22 @@
 // ── buildnep.cpp — NEP (NeoRunST Executable Program) 构建工具 ──
-// 编译:  g++ -O2 -std=c++17 buildnep.cpp -o buildnep.exe
-// 用法:  buildnep.exe <src.c> [src2.c ...] [-o out.nep] [--base 0x400000] [--tc x86_64-elf-]
-//        buildnep.exe -l <obj.o> [obj2.o ...] [-o out.nep] [--base ...] [--tc ...]
+// 编译:  Windows:  g++ -O2 -std=c++17 buildnep.cpp -o buildnep.exe
+//        Unix-like (macOS/Linux/BSD):
+//                        c++ -O2 -std=c++17 buildnep.cpp -o buildnep
+// 用法:  buildnep <src.c> [src2.c ...] [-o out.nep] [--base 0x400000] [--tc x86_64-elf-]
+//        buildnep -l <obj.o> [obj2.o ...] [-o out.nep] [--base ...] [--tc ...]
 //        -o 省略时默认输出 <第一个源文件名>.nep
 //        -l: 输入是已编译的 .o (跳过编译直接链接; crt0 仍会自动编译),
 //            支持多个 .o, 适合只改部分文件的增量构建
 //        独立可用 (不依赖 make): exe 放在 dev 工具包根目录或目录树下均可,
-//        自动定位 tools\ 里的 crt0.c / nep.h 和根目录的 stdio.h / runst.h
+//        自动定位 tools/ 里的 crt0.c / nep.h 和根目录的 stdio.h / runst.h
+//
+// 跨平台说明: 全程只用标准 C/C++ + 平台分支 (mkdir / 临时目录),
+// 路径分隔符统一 '/', Windows 各工具与 C 运行库均接受。
+// Unix-like 需要 x86_64-elf 交叉工具链 (binutils) 在 PATH:
+//   macOS: brew install x86_64-elf-binutils
+//   Debian/Ubuntu: apt install binutils-x86-64-linux-gnu (或自编 binutils
+//     --target=x86_64-elf); Arch: pacman -S x86_64-elf-binutils
+//   前缀不同可用 --tc 或环境变量 NEP_TC 覆盖 (如 --tc x86_64-linux-gnu-)
 //
 // 流程: x86_64-elf-gcc 编译 crt0.c + 源文件 → ld 链接到固定基址 →
 //       objcopy 抽平坦二进制 → 前面拼 24 字节 NEP 头
@@ -19,14 +29,18 @@
 // 需要时覆盖, 必须页对齐且落在内核允许的用户区。
 //
 // 工具链: 默认前缀 x86_64-elf-, 可用 --tc 或环境变量 NEP_TC 覆盖。
-// 安装:  mcopy -i bin/NeoRunST.img hello.nep ::/  然后在文件管理器点击。
+// 安装:  mcopy -i /neorunst.vhd hello.nep ::/  然后在文件管理器点击。
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#ifdef _WIN32
 #include <direct.h>   // _mkdir
+#else
+#include <sys/stat.h> // mkdir
+#endif
 
 static std::string TOOLS_DIR;            // dev\tools (crt0.c / nep.h 在这里)
 static std::string DEV_DIR;              // dev 根 (stdio.h 在这里)
@@ -59,8 +73,17 @@ static void run(const std::string& cmd) {
         die("命令失败 (exit " + std::to_string(rc) + "): " + cmd);
 }
 
-// 给 Windows 命令行的参数加引号
+// 给命令行参数加引号 (Windows cmd 与 POSIX shell 通用)
 static std::string q(const std::string& s) { return "\"" + s + "\""; }
+
+// 跨平台建目录 (已存在不报错)
+static void mkdir1(const char* path) {
+#ifdef _WIN32
+    _mkdir(path);
+#else
+    mkdir(path, 0755);
+#endif
+}
 
 static bool read_file(const std::string& path, std::vector<unsigned char>& out) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -92,7 +115,7 @@ int main(int argc, char** argv) {
     bool link_only = false;   // -l: 输入是 .o, 跳过编译直接链接
 
     // 目录定位 (独立可用): 从 argv[0] 所在目录开始, 每一级先试
-    //   <目录>\tools\crt0.c  再试 <目录>\crt0.c,
+    //   <目录>/tools/crt0.c  再试 <目录>/crt0.c,
     //   找到的就是 tools 目录 (crt0.c / nep.h); 其上一级是 dev 根 (stdio.h / runst.h)
     {
         std::string a0 = argv[0];
@@ -100,13 +123,13 @@ int main(int argc, char** argv) {
         std::string dir = (p == std::string::npos) ? "." : a0.substr(0, p);
         if (dir.empty()) dir = ".";
         for (int i = 0; i < 4 && TOOLS_DIR.empty(); i++) {
-            const char* candidates[2] = { "\\tools\\crt0.c", "\\crt0.c" };
+            const char* candidates[2] = { "/tools/crt0.c", "/crt0.c" };
             for (int k = 0; k < 2; k++) {
                 std::string probe = dir + candidates[k];
                 FILE* f = std::fopen(probe.c_str(), "rb");
                 if (f) {
                     std::fclose(f);
-                    TOOLS_DIR = dir + ((k == 0) ? "\\tools" : "");
+                    TOOLS_DIR = dir + ((k == 0) ? "/tools" : "");
                     break;
                 }
             }
@@ -116,7 +139,7 @@ int main(int argc, char** argv) {
             dir = dir.substr(0, q);
         }
         if (TOOLS_DIR.empty())
-            die("找不到 tools\\crt0.c — 请把 buildnep.exe 放在 dev 工具包目录内运行");
+            die("找不到 tools/crt0.c — 请把 buildnep 放在 dev 工具包目录内运行");
         size_t r = TOOLS_DIR.find_last_of("\\/");
         DEV_DIR = (r == std::string::npos) ? "." : TOOLS_DIR.substr(0, r);
     }
@@ -169,15 +192,20 @@ int main(int argc, char** argv) {
     std::string gcc = tc + "gcc", ld = tc + "ld",
                 objcopy = tc + "objcopy", nm = tc + "nm";
 
-    // 临时目录
+    // 临时目录: Windows 用 %TEMP% (回退 "."), Unix 用 $TMPDIR (回退 /tmp)
+#ifdef _WIN32
     const char* tmpenv = std::getenv("TEMP");
-    std::string tmp = (tmpenv ? tmpenv : ".") + std::string("\\nepbuild");
-    _mkdir(tmp.c_str());   // 已存在不报错
+    std::string tmp = (tmpenv ? tmpenv : ".") + std::string("/nepbuild");
+#else
+    const char* tmpenv = std::getenv("TMPDIR");
+    std::string tmp = (tmpenv ? tmpenv : "/tmp") + std::string("/nepbuild");
+#endif
+    mkdir1(tmp.c_str());   // 已存在不报错
 
     // 编译: crt0 最先 → _start 落在 .text 开头
     std::vector<std::string> objs;
     std::vector<std::string> srcs;
-    srcs.push_back(TOOLS_DIR + "\\crt0.c");
+    srcs.push_back(TOOLS_DIR + "/crt0.c");
     for (auto& s : sources) srcs.push_back(s);
 
     const char* CFLAGS =
@@ -188,7 +216,7 @@ int main(int argc, char** argv) {
     // -l 模式: 用户输入已是 .o, 只有 crt0 需要编译, 其余直接进链接
     for (size_t i = 0; i < srcs.size(); i++) {
         char objname[64];
-        std::snprintf(objname, sizeof(objname), "\\o%zu.o", i);
+        std::snprintf(objname, sizeof(objname), "/o%zu.o", i);
         std::string obj = tmp + objname;
         if (link_only && i > 0) {
             std::printf("  (skip) %s 已是目标文件, 直接链接\n", srcs[i].c_str());
@@ -201,7 +229,7 @@ int main(int argc, char** argv) {
     }
 
     // 链接
-    std::string lds = tmp + "\\nep.ld";
+    std::string lds = tmp + "/nep.ld";
     {
         std::string script = LDSCRIPT;
         char buf[32];
@@ -210,7 +238,7 @@ int main(int argc, char** argv) {
         script.replace(at, 6, buf);
         write_file(lds, script.data(), script.size());
     }
-    std::string elf = tmp + "\\out.elf";
+    std::string elf = tmp + "/out.elf";
     {
         std::string cmd = ld + " -T " + q(lds) + " -o " + q(elf);
         for (auto& o : objs) cmd += " " + q(o);
@@ -220,7 +248,7 @@ int main(int argc, char** argv) {
     // 从符号表找 _start 的实际偏移 (正常应为 0)
     unsigned long entry_off = 0;
     {
-        std::string nmout_file = tmp + "\\nm.txt";
+        std::string nmout_file = tmp + "/nm.txt";
         run(nm + " " + q(elf) + " > " + q(nmout_file));
         std::vector<unsigned char> nmout;
         if (!read_file(nmout_file, nmout)) die("nm 输出读取失败");
@@ -246,7 +274,7 @@ int main(int argc, char** argv) {
     }
 
     // 抽平坦二进制
-    std::string binpath = tmp + "\\out.bin";
+    std::string binpath = tmp + "/out.bin";
     run(objcopy + " -O binary " + q(elf) + " " + q(binpath));
     std::vector<unsigned char> image;
     if (!read_file(binpath, image)) die("镜像读取失败");

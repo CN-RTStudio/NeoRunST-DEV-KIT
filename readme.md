@@ -354,6 +354,7 @@ int nep_main(void) {
 | `nep_on_shutdown(cb)` | 注册关机回调 `int cb(void)`: 返回 0 = 阻止关机, 非 0 = 同意退出; 关机流程会轮询等待 |
 | `nep_ticks()` | 开机毫秒数 (syscall 44), 计时/os.clock 类用途 |
 | `nep_sleep(ms)` | 毫秒级休眠 (syscall 45): 任务挂起到点唤醒, 等待不耗 CPU |
+| `nep_except_set(h)` | 注册用户态异常处理器 (syscall 48): PF/GPF 等硬件异常不再默认弹窗杀任务, 而是转入 `void h(long exc, unsigned long addr)`; handler 返回会链式再投递 (≤3 层), 传 0 = 注销。示例 `except_test.c` |
 
 ### 原始键盘 (nep.h, 游戏类程序用)
 
@@ -407,10 +408,28 @@ buildnep.exe -l a.o b.o -o app.nep # 已编译的 .o 直接链接 (跳过编译)
 - 工具链前缀默认 `x86_64-elf-`，可用 `--tc` 或环境变量 `NEP_TC` 覆盖
 - `--base 0x...` 一般不需要——隔离后所有程序固定用 0x400000 也不冲突
 
+### 跨平台 (macOS / Linux / BSD)
+
+buildnep 是纯标准 C++ 写的, 在 Unix-like 上同样可用:
+
+```sh
+c++ -O2 -std=c++17 tools/code/buildnep.cpp -o buildnep   # 编译本体
+./buildnep hello.c -o hello.nep                          # 用法一致
+```
+
+- 需要 x86_64-elf 交叉 binutils 在 PATH: macOS `brew install
+  x86_64-elf-binutils`; Debian/Ubuntu `apt install
+  binutils-x86-64-linux-gnu`; Arch `pacman -S x86_64-elf-binutils`;
+  FreeBSD `pkg install x86_64-elf-binutils`
+- 带 linux-gnu 后缀的前缀用 `--tc x86_64-linux-gnu-` 或
+  `export NEP_TC=x86_64-linux-gnu-` 覆盖 (目标相同, 可直接用于 NEP)
+- 临时目录: Windows `%TEMP%\nepbuild`, Unix `$TMPDIR/nepbuild`
+  (回退 `/tmp/nepbuild`); 路径分隔符统一 `/`, 无平台专属硬编码
+
 ## 安装与运行
 
 ```sh
-mcopy -i ../NeoRunST-CustomOS/kernel/bin/NeoRunST.img hello.nep ::/
+mcopy -i /neorunst.vhd hello.nep ::/
 ```
 
 然后在 NeoRunST 的文件管理器里点击 .nep 运行。
