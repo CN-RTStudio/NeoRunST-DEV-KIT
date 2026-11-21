@@ -331,7 +331,7 @@ buildnep.exe -l a.o b.o -o app.nep # 已编译的 .o 直接链接 (跳过编译)
 ## 安装与运行
 
 ```sh
-mcopy -i ../NeoRunST-CustomOS/kernel/bin/NeoRunST.img hello.nep ::/
+mcopy -i /neorunst.vhd hello.nep ::/
 ```
 
 然后在 NeoRunST 的文件管理器里点击 .nep 运行。

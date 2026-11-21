@@ -265,3 +265,45 @@ static inline int net_parse_ip(const char* s, unsigned char out[4]) {
 static inline int ping(const unsigned char ip[4], int count) {
     return nep_ping(ip, count);
 }
+
+// ── 音频播放 (底层: nep_aud_*, PCM 16bit 小端, 内核重采样 48kHz 立体声) ──
+// 打开一路混音源, 返回句柄 (<0 失败)。rate/channels = 源格式, loop = 循环
+static inline int audio_open(long rate, long channels) {
+    return nep_aud_open(rate, channels, 0);
+}
+
+// 写 PCM 数据, 返回实际接受字节 (< 请求 = 源环满, 稍后再补)
+static inline long audio_write(int h, const void* pcm16, long bytes) {
+    return nep_aud_write(h, pcm16, bytes);
+}
+
+// 当前可写字节数 (写入前查水位, 避免阻塞式重试)
+static inline long audio_free_space(int h) {
+    return nep_aud_space(h);
+}
+
+// 关闭源 (立即释放混音槽; 程序退出时内核也会回收)
+static inline int audio_close(int h) {
+    return nep_aud_close(h);
+}
+
+// 本路音量 0..100, 返回旧值
+static inline int audio_set_volume(int h, int vol) {
+    return nep_aud_set_gain(h, vol);
+}
+static inline int audio_get_volume(int h) {
+    return nep_aud_get_gain(h);
+}
+
+// 系统总音量 0..100
+static inline int audio_master_volume(void) {
+    return nep_aud_master_get();
+}
+static inline int audio_set_master(int v) {
+    return nep_aud_master_set(v);
+}
+
+// 播放进度: pos[0]=已播字节, pos[1]=已写字节 (源格式)。0 = 成功
+static inline int audio_position(int h, unsigned long long pos[2]) {
+    return nep_aud_pos(h, pos);
+}

@@ -590,3 +590,74 @@ static inline int nep_heap_grow(long total_bytes) {
                      : "a"(43L), "D"((long)total_bytes) : "memory");
     return (int)r;
 }
+
+// ═══ 异常回调 (syscall 48) ═══
+// 注册用户态异常/信号处理器 (除 0、非法内存访问、kill 等内核送出的
+// exc)。返回旧处理器 (链式保存), 传 0 = 注销。注册后内核不再直接
+// 杀进程, 而是改写上下文跳进 handler(exc, addr)
+typedef void (*nep_except_handler)(long exc, unsigned long addr);
+static inline nep_except_handler nep_except_set(nep_except_handler h) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(48L), "D"(h) : "memory");
+    return (nep_except_handler)r;
+}
+
+// ═══ 音频 (49~57): 软件混音器源 (PCM 16bit 小端) ═══
+// open 指定采样率/声道 (内核重采样到 48kHz/立体声 经 HDA 输出); 最多
+// 4 路并发; 程序退出时内核自动回收未关闭的源。写法: 先 aud_space 看
+// 源环可写字节, 再 aud_write 喂数据 (返回实际接受字节)。
+// 更高层封装 (audio_*) 在 runst.h
+static inline int nep_aud_open(long rate, long channels, long loop) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(49L), "D"(rate), "S"(channels), "d"(loop) : "memory");
+    return (int)r;
+}
+static inline long nep_aud_write(int id, const void* pcm16, long len) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(50L), "D"((long)id), "S"(pcm16), "d"(len) : "memory");
+    return r;
+}
+static inline long nep_aud_space(int id) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(51L), "D"((long)id) : "memory");
+    return r;
+}
+static inline int nep_aud_close(int id) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(52L), "D"((long)id) : "memory");
+    return (int)r;
+}
+static inline int nep_aud_set_gain(int id, int vol) {   // 每流音量 0..100 → 旧值
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(53L), "D"((long)id), "S"((long)vol) : "memory");
+    return (int)r;
+}
+static inline int nep_aud_get_gain(int id) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(54L), "D"((long)id) : "memory");
+    return (int)r;
+}
+static inline int nep_aud_master_get(void) {            // 总音量 0..100
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(55L) : "memory");
+    return (int)r;
+}
+static inline int nep_aud_master_set(int vol) {         // 总音量 0..100 → 旧值
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(56L), "D"((long)vol) : "memory");
+    return (int)r;
+}
+// 播放进度: pos[0]=已播字节, pos[1]=已写字节 (源格式)。0 = 成功
+static inline int nep_aud_pos(int id, unsigned long long pos[2]) {
+    long r;
+    __asm__ volatile("int $0x80" : "=a"(r)
+                     : "a"(57L), "D"((long)id), "S"(pos) : "memory");
+    return (int)r;
+}

@@ -55,6 +55,7 @@ buildnep.exe 会自动定位 tools\ 与本目录，把所有头都加进搜索�
 | `window_wait()` | 事件等待 (窗口程序主循环: 按钮回调/X 由内核直接唤醒) |
 | `reg_get / reg_set / reg_del_value / reg_del_key / reg_list / reg_create_key` | 注册表读写 (default.rreg, 见下) |
 | `net_connect / net_send / net_recv / net_close / net_parse_ip / ping` | 网络: TCP 客户端 + ICMP ping (见"网络"一节) |
+| `audio_open / audio_write / audio_free_space / audio_close / audio_set_volume / audio_get_volume / audio_master_volume / audio_set_master / audio_position` | 音频播放: PCM 16bit 混音源 + 音量控制 (见"音频播放"一节) |
 
 ### 消息框 (runst.h)
 
@@ -176,6 +177,42 @@ int ok = ping(ip, 3);                         // ping 3 次, 返回成功次数
   -3 = 被 RST, -4 = 握手超时
 - 宿主机 ping 虚机里的系统是可以的 (系统内核自带 ARP/ICMP Echo 应答),
   虚机自己的 IP 看 "hello net" 窗口的 DHCP 信息
+
+### 音频播放 (runst.h)
+
+PCM 16bit 小端播放, 内核混音器重采样到 48kHz 立体声输出 (Intel HDA)。
+每个 `audio_open` 是一路独立混音源, 多路同时播放自动混合:
+
+```c
+#include "runst.h"
+
+int h = audio_open(44100, 2);            // 源格式: 44.1kHz 立体声, <0 失败
+if (h >= 0) {
+    // 循环喂 PCM: 先查水位, 满了稍后再补 (非阻塞)
+    while (playing) {
+        long n = audio_free_space(h);
+        if (n > 0) {
+            long w = audio_write(h, pcm16, bytes < n ? bytes : n);
+            pcm16 += w; bytes -= w;      // 返回实际接受字节 (< 请求 = 源环满)
+        }
+        unsigned long long pos[2];
+        audio_position(h, pos);          // pos[0]=已播字节 pos[1]=已写字节
+    }
+    audio_close(h);                      // 立即释放混音槽 (退出时内核也会回收)
+}
+```
+
+| 函数 | 说明 |
+|------|------|
+| `audio_open(rate, channels)` | 打开一路混音源, 返回句柄 (<0 失败); rate/channels = 源格式 |
+| `audio_write(h, pcm16, bytes)` | 写 PCM 16bit 数据, 返回实际接受字节 (< 请求 = 源环满, 稍后再补) |
+| `audio_free_space(h)` | 当前可写字节数 (写入前查水位, 避免阻塞式重试) |
+| `audio_close(h)` | 关闭该路混音源 |
+| `audio_set_volume(h, vol)` | 本路音量 0..100, 返回旧值 |
+| `audio_get_volume(h)` | 读本路音量 |
+| `audio_master_volume()` | 系统总音量 0..100 |
+| `audio_set_master(v)` | 设系统总音量, 返回旧值 |
+| `audio_position(h, pos[2])` | 播放进度: pos[0]=已播字节, pos[1]=已写字节 (源格式), 0 = 成功 |
 
 ### string.h (字符串/内存)
 

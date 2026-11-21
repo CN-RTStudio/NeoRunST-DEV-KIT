@@ -405,7 +405,18 @@ static int nr_vfmt(char* out, int cap, const char* fmt, va_list ap) {
             int m = 0;
             if (!v) tmp[m++] = '0';
             while (v) { tmp[m++] = hex[v % (unsigned)base]; v /= (unsigned)base; }
+            // 精度: 数字至少 prec 位 (补零); prec==0 且值为 0 → 空数字
+            int zeros = 0;
+            if (prec >= 0) {
+                if (prec == 0 && m == 1 && tmp[0] == '0') m = 0;
+                else if (prec > m) zeros = prec - m;
+            }
+            int neglen = neg ? 1 : 0;
+            int body = m + zeros + neglen;
+            if (width > body && !f_minus && !f_zero)
+                while (width-- > body) NR_PUT(' ');
             if (neg) NR_PUT('-');
+            while (zeros--) NR_PUT('0');
             while (m) NR_PUT(tmp[--m]);
             continue;
         }
